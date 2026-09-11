@@ -1,21 +1,22 @@
 # 使用官方 Node.js 18 镜像
 FROM node:18-alpine
 
-# 安装 Chromium 和相关依赖（用于 Puppeteer）
-RUN apk add --no-cache \
+# 换 Alpine apk 国内源（阿里云），并安装 Chromium 和相关依赖
+RUN sed -i 's#dl-cdn.alpinelinux.org#mirrors.aliyun.com#g' /etc/apk/repositories \
+    && apk add --no-cache \
     chromium \
     nss \
     freetype \
     freetype-dev \
     harfbuzz \
     ca-certificates \
-    ttf-freefont \
-    && rm -rf /var/cache/apk/*
+    ttf-freefont
 
 # 设置 Puppeteer 使用系统安装的 Chromium
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
     PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser \
-    HEADLESS=true
+    HEADLESS=true \
+    NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
 
 # 设置工作目录
 WORKDIR /app
