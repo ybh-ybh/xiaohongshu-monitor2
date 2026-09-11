@@ -3,132 +3,169 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>小红书商品销量监控系统</title>
+    <meta name="theme-color" content="#f6f7f9">
+    <title>小红书商品库存监控系统</title>
+    <link rel="icon" href="data:,">
     <link rel="stylesheet" href="style.css">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
-    <div class="container">
-        <header class="header">
-            <h1>小红书商品销量监控系统</h1>
-            <p class="subtitle">实时监控竞品销量变化，助力商业决策</p>
+    <div class="app-shell">
+        <header class="topbar">
+            <a class="brand" href="#monitor" aria-label="小红书监控首页">
+                <span class="brand-mark" aria-hidden="true">◔</span>
+                <span class="brand-name">XHS <strong>Pulse</strong></span>
+            </a>
+            <nav class="topbar-nav" aria-label="顶部导航">
+                <a class="active" href="#products">控制台</a>
+            </nav>
+            <div class="topbar-tools">
+                <button class="avatar-button" type="button" title="账户" aria-label="账户">Y</button>
+            </div>
         </header>
 
-        <div class="add-product-section">
-            <div class="input-tabs">
-                <button class="tab-btn active" onclick="switchTab('single')">单个添加</button>
-                <button class="tab-btn" onclick="switchTab('batch')">批量添加</button>
-            </div>
-            
-            <div id="singleTab" class="tab-content active">
-                <div class="input-group">
-                    <input type="text" id="productUrl" placeholder="请输入小红书商品链接..." class="url-input">
-                    <button onclick="addProduct()" class="btn btn-primary">添加商品</button>
-                    <button onclick="refreshAllData()" class="btn btn-secondary">刷新所有数据</button>
+        <div class="app-layout">
+            <aside class="sidebar">
+                <div class="sidebar-label">常规</div>
+                <nav class="sidebar-nav" aria-label="侧边导航">
+                    <a class="nav-item active" href="#monitor" aria-current="page"><span class="nav-icon" aria-hidden="true">⌁</span>概览</a>
+                    <a class="nav-item" href="#mail"><span class="nav-icon" aria-hidden="true">✉</span>邮件通知</a>
+                </nav>
+                <div class="sidebar-label sidebar-label-spaced">系统</div>
+                <nav class="sidebar-nav" aria-label="系统导航">
+                    <a class="nav-item" href="#logs"><span class="nav-icon" aria-hidden="true">▤</span>操作日志</a>
+                </nav>
+                <div class="sidebar-footer">
+                    <span class="status-pulse" aria-hidden="true"></span>
+                    <div><strong>采集服务在线</strong><small>数据自动同步中</small></div>
                 </div>
-            </div>
-            
-            <div id="batchTab" class="tab-content">
-                <div class="batch-input-group">
-                    <textarea id="batchUrls" placeholder="请输入多个小红书商品链接，每行一个链接..." class="batch-textarea"></textarea>
-                    <div class="batch-buttons">
-                        <button onclick="addBatchProducts()" class="btn btn-primary">批量添加</button>
-                        <button onclick="clearBatchInput()" class="btn btn-secondary">清空</button>
+            </aside>
+
+            <main class="main-content" id="monitor">
+                <section class="page-heading">
+                    <div>
+                        <h1>库存监控</h1>
                     </div>
-                </div>
-                <div id="batchProgress" class="batch-progress" style="display: none;">
-                    <div class="progress-bar">
-                        <div id="progressFill" class="progress-fill"></div>
+                    <div class="heading-actions">
+                        <button onclick="refreshAllData()" class="btn btn-quiet" type="button"><span aria-hidden="true">↻</span>刷新数据</button>
+                        <button onclick="testEmail()" class="btn btn-primary" type="button"><span aria-hidden="true">✉</span>测试邮件</button>
                     </div>
-                    <div id="progressText" class="progress-text">正在处理...</div>
+                </section>
+
+                <section class="metric-strip" aria-label="监控概览">
+                    <article class="metric-card metric-card-accent">
+                        <div class="metric-label"><span class="metric-mark coral" aria-hidden="true"></span>监控商品</div>
+                        <strong id="metricProducts">—</strong>
+                        <small>当前追踪中的商品</small>
+                    </article>
+                    <article class="metric-card">
+                        <div class="metric-label"><span class="metric-mark teal" aria-hidden="true"></span>有货商品</div>
+                        <strong id="metricInStock">—</strong>
+                        <small>最近一次采集结果</small>
+                    </article>
+                    <article class="metric-card">
+                        <div class="metric-label"><span class="metric-mark coral" aria-hidden="true"></span>缺货商品</div>
+                        <strong id="metricOutOfStock">—</strong>
+                        <small>最近一次采集为无货</small>
+                    </article>
+                    <article class="metric-card">
+                        <div class="metric-label"><span class="metric-mark ink" aria-hidden="true"></span>数据状态</div>
+                        <strong class="metric-status"><span class="status-pulse"></span>正常</strong>
+                        <small>服务连接稳定</small>
+                    </article>
+                </section>
+
+                <section class="workspace-card" id="products">
+                    <div class="workspace-head">
+                        <div>
+                            <div class="workspace-title-line">
+                                <h2>商品清单</h2>
+                                <span class="record-count" id="recordCount">— 条记录</span>
+                            </div>
+                            <p>管理监控链接，及时掌握商品库存状态。</p>
+                        </div>
+                    </div>
+
+                    <div class="add-product-section" id="mail">
+                        <div class="input-tabs" role="tablist" aria-label="添加商品方式">
+                            <button class="tab-btn active" type="button" role="tab" aria-selected="true" onclick="switchTab('single')">单个添加</button>
+                            <button class="tab-btn" type="button" role="tab" aria-selected="false" onclick="switchTab('batch')">批量添加</button>
+                        </div>
+
+                        <div id="singleTab" class="tab-content active" role="tabpanel">
+                            <div class="input-group">
+                                <label class="field-label" for="productUrl">商品链接</label>
+                                <input type="text" id="productUrl" placeholder="粘贴小红书商品链接或分享文本" class="url-input">
+                                <button onclick="addProduct()" class="btn btn-primary" type="button">添加商品</button>
+                            </div>
+                        </div>
+
+                        <div id="batchTab" class="tab-content" role="tabpanel">
+                            <div class="batch-input-group">
+                                <label class="field-label" for="batchUrls">商品链接</label>
+                                <textarea id="batchUrls" placeholder="每行粘贴一个小红书商品链接或分享文本" class="batch-textarea"></textarea>
+                                <div class="batch-buttons">
+                                    <button onclick="addBatchProducts()" class="btn btn-primary" type="button">批量添加</button>
+                                    <button onclick="clearBatchInput()" class="btn btn-outline" type="button">清空</button>
+                                </div>
+                            </div>
+                            <div id="batchProgress" class="batch-progress" style="display: none;">
+                                <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
+                                <div id="progressText" class="progress-text">正在处理...</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="table-toolbar">
+                        <div class="table-heading">
+                            <span class="table-kicker">LIVE CATALOG</span>
+                            <span class="table-hint">最近更新的商品排在前面</span>
+                        </div>
+                        <div class="controls">
+                            <div class="sort-controls">
+                                <label for="sortBy">排序</label>
+                                <select id="sortBy" onchange="sortTable()">
+                                    <option value="id">添加时间</option>
+                                    <option value="price">商品价格</option>
+                                    <option value="stockStatus">库存状态</option>
+                                </select>
+                                <select id="sortOrder" onchange="sortTable()" aria-label="排序方向">
+                                    <option value="desc">降序</option>
+                                    <option value="asc">升序</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="table-container">
+                        <table id="productsTable" class="products-table">
+                            <thead>
+                                <tr>
+                                    <th>商品名称</th>
+                                    <th>商品价格</th>
+                                    <th>库存状态</th>
+                                    <th>店铺名称</th>
+                                    <th>最后更新时间</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="productsTableBody"></tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <div class="page-footer" id="logs">
+                    <span>小红书商品库存监控</span>
+                    <span>库存状态仅供参考，请以商品页为准</span>
                 </div>
-            </div>
+            </main>
         </div>
-
-        <div class="controls">
-            <div class="sort-controls">
-                <label>排序方式：</label>
-                <select id="sortBy" onchange="sortTable()">
-                    <option value="id">添加时间</option>
-                    <option value="price">商品价格</option>
-                    <option value="product_total_sales">商品总销量</option>
-                    <option value="daily_product_sales">商品日销量</option>
-                    <option value="daily_gmv">商品日GMV</option>
-                    <option value="shop_total_sales">店铺总销量</option>
-                    <option value="daily_shop_sales">店铺日销量</option>
-                </select>
-                <select id="sortOrder" onchange="sortTable()">
-                    <option value="desc">降序</option>
-                    <option value="asc">升序</option>
-                </select>
-            </div>
-        </div>
-
-        <div class="table-container">
-            <table id="productsTable" class="products-table">
-                <thead>
-                    <tr>
-                        <th>商品名称</th>
-                        <th>商品价格</th>
-                        <th>库存状态</th>
-                        <th>商品总销量</th>
-                        <th>商品日销量</th>
-                        <th>商品日GMV</th>
-                        <th>店铺名称</th>
-                        <th>店铺总销量</th>
-                        <th>店铺日销量</th>
-                        <th>最后更新时间</th>
-                        <th>操作</th>
-                    </tr>
-                </thead>
-                <tbody id="productsTableBody">
-                    <!-- 数据将通过JavaScript动态加载 -->
-                </tbody>
-            </table>
-        </div>
-
-        <div id="loading" class="loading" style="display: none;">
-            <div class="spinner"></div>
-            <p>正在处理中...</p>
-        </div>
-
-        <div id="message" class="message" style="display: none;"></div>
     </div>
 
-    <!-- 销量趋势图模态框 -->
-    <div id="trendModal" class="modal" style="display: none;">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h2 id="trendTitle">商品销量趋势</h2>
-                <span class="close" onclick="closeTrendModal()">&times;</span>
-            </div>
-            <div class="modal-body">
-                <div class="chart-container">
-                    <canvas id="trendChart"></canvas>
-                </div>
-                <div class="trend-info">
-                    <div class="trend-stats">
-                        <div class="stat-item">
-                            <span class="stat-label">总销量：</span>
-                            <span id="totalSales" class="stat-value">-</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="stat-label">平均日销量：</span>
-                            <span id="avgDailySales" class="stat-value">-</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="stat-label">最高日销量：</span>
-                            <span id="maxDailySales" class="stat-value">-</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="stat-label">监控天数：</span>
-                            <span id="monitorDays" class="stat-value">-</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
+    <div id="loading" class="loading" style="display: none;">
+        <div class="spinner"></div>
+        <p>正在处理中...</p>
     </div>
+    <div id="message" class="message" style="display: none;"></div>
 
     <script src="script.js"></script>
 </body>

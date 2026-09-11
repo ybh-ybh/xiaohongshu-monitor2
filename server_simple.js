@@ -18,6 +18,12 @@ require('dotenv').config();
 const app = express();
 // 读取服务端口配置，未配置时使用 3001。
 const PORT = parseInt(process.env.PORT || '3001', 10);
+// 记录是否由用户显式指定端口，避免静默改变部署配置。
+const PORT_IS_EXPLICIT = Boolean(process.env.PORT);
+// Windows 可能保留默认端口，权限失败时使用本机备用端口。
+const FALLBACK_PORT = 3200;
+// 保存当前实际监听端口，默认值用于服务启动前的接口处理。
+let activePort = PORT;
 // 读取轮询间隔配置，默认每 5 分钟检查一次。
 const CHECK_INTERVAL_MINUTES = Math.max(1, parseInt(process.env.CHECK_INTERVAL_MINUTES || '5', 10));
 // 读取是否使用无头浏览器的配置。
@@ -130,19 +136,28 @@ function getMailTransporter() {
     return mailTransporter;
 }
 
+// 读取邮件收件人配置；优先使用多收件人变量并兼容旧的单收件人变量。
+function getMailRecipients() {
+    // 获取多收件人配置文本，未设置时回退到旧配置。
+    const recipientsText = process.env.MAIL_RECIPIENTS || process.env.MAIL_RECIPIENT || '';
+    // 支持英文逗号和分号分隔，并过滤空白项。
+    return recipientsText.split(/[;,]/).map(recipient => recipient.trim()).filter(Boolean);
+}
+
 // 发送商品恢复库存通知邮件。
 async function sendRestockEmail(product, productData) {
     // 未配置邮件账号时只记录日志，不阻断商品监控任务。
     const transporter = getMailTransporter();
-    const recipient = process.env.MAIL_RECIPIENT;
-    if (!transporter || !recipient) {
+    // 获取本次邮件的全部收件人。
+    const recipients = getMailRecipients();
+    if (!transporter || recipients.length === 0) {
         console.warn('未配置完整邮件参数，跳过补货邮件通知。');
         return false;
     }
     // 发送包含商品名称、价格、库存状态和直达链接的邮件。
     await transporter.sendMail({
         from: process.env.MAIL_USERNAME,
-        to: recipient,
+        to: recipients,
         subject: `小红书商品补货提醒：${productData.name || product.name || '未知商品'}`,
         text: [
             '检测到小红书商品可能已补货。',
@@ -987,10 +1002,10 @@ app.delete('/api/products/:id', (req, res) => {
 // 提供邮件配置测试接口，便于部署后验证 SMTP 参数。
 app.post('/api/mail/test', async (req, res) => {
     // 使用用户指定或默认测试内容发送一封测试邮件。
-    const testProduct = { name: '邮件配置测试', price: 0, stockStatus: 'IN_STOCK', stockReason: '手动测试', url: 'http://localhost:3001' };
+    const testProduct = { name: '邮件配置测试', price: 0, stockStatus: 'IN_STOCK', stockReason: '手动测试', url: `http://localhost:${activePort}` };
     try {
         const sent = await sendRestockEmail(testProduct, testProduct);
-        if (!sent) return res.status(503).json({ error: '未配置完整邮件参数' });
+        if (!sent) return res.status(503).json({ error: '未配置完整邮件参数，请检查 MAIL_USERNAME、MAIL_PASSWORD 和 MAIL_RECIPIENTS' });
         return res.json({ message: '测试邮件已发送' });
     } catch (error) {
         console.error('测试邮件发送失败:', error);
@@ -1096,9 +1111,52 @@ app.get('/health', (req, res) => {
         products: products.length,
         uptime: process.uptime(),
         check_interval_minutes: CHECK_INTERVAL_MINUTES,
-        mail_configured: Boolean(process.env.MAIL_USERNAME && process.env.MAIL_PASSWORD && process.env.MAIL_RECIPIENT)
+        mail_configured: Boolean(process.env.MAIL_USERNAME && process.env.MAIL_PASSWORD && getMailRecipients().length > 0)
     });
 });
+
+// 启动服务器并处理 Windows 保留端口导致的权限错误。
+function startServer(port) {
+    // 创建 HTTP 服务并监听指定端口。
+    const server = app.listen(port, '0.0.0.0', () => {
+        // 保存实际监听端口，供日志和接口返回正确地址。
+        activePort = port;
+        console.log(`================================`);
+        console.log(`小红书监控系统已启动`);
+        console.log(`访问地址: http://localhost:${port}`);
+        console.log(`================================`);
+        console.log(`当前商品数量: ${products.length}`);
+        console.log(`历史数据记录: ${salesData.length} 条`);
+        console.log('数据存储: JSON文件持久化');
+        console.log('数据目录:', DATA_DIR);
+        console.log(`================================`);
+        console.log('⏰ 自动刷新功能已启用');
+        console.log(`📅 刷新频率: 每 ${CHECK_INTERVAL_MINUTES} 分钟一次`);
+        console.log(`================================`);
+
+        // 启动后 10 秒执行一次初始刷新，确保服务启动后尽快建立库存基线。
+        setTimeout(async () => {
+            console.log('🚀 执行启动后的初始数据刷新...');
+            await autoRefreshAllProducts();
+        }, 10 * 1000);
+    });
+
+    // 监听启动错误，避免出现未处理的 error 事件导致堆栈退出。
+    server.on('error', error => {
+        // 默认端口被 Windows 保留时自动切换本机备用端口。
+        if (error.code === 'EACCES' && !PORT_IS_EXPLICIT && port === PORT) {
+            console.warn(`端口 ${PORT} 无法监听（可能被 Windows 保留），尝试备用端口 ${FALLBACK_PORT}。`);
+            startServer(FALLBACK_PORT);
+            return;
+        }
+
+        // 显式端口或其他错误必须直接提示，避免掩盖部署配置问题。
+        console.error(`服务器启动失败（端口 ${port}）：${error.message}`);
+        process.exit(1);
+    });
+
+    return server;
+}
 
 // 启动服务器
 // 进程退出时释放共享浏览器资源。
@@ -1111,23 +1169,4 @@ process.once('SIGTERM', async () => {
     await closeBrowser();
     process.exit(0);
 });
-const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`================================`);
-    console.log(`小红书监控系统已启动`);
-    console.log(`访问地址: http://localhost:${PORT}`);
-    console.log(`================================`);
-    console.log(`当前商品数量: ${products.length}`);
-    console.log(`历史数据记录: ${salesData.length} 条`);
-    console.log('数据存储: JSON文件持久化');
-    console.log('数据目录:', DATA_DIR);
-    console.log(`================================`);
-    console.log('⏰ 自动刷新功能已启用');
-    console.log(`📅 刷新频率: 每 ${CHECK_INTERVAL_MINUTES} 分钟一次`);
-    console.log(`================================`);
-
-    // 启动后 10 秒执行一次初始刷新，确保服务启动后尽快建立库存基线。
-    setTimeout(async () => {
-        console.log('🚀 执行启动后的初始数据刷新...');
-        await autoRefreshAllProducts();
-    }, 10 * 1000);
-});
+startServer(PORT);

@@ -82,17 +82,6 @@ function extractXhsUrl(text) {
     return null;
 }
 
-// 切换标签页
-function switchTab(tabName) {
-    // 更新标签按钮状态
-    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-    document.querySelector(`[onclick="switchTab('${tabName}')"]`).classList.add('active');
-    
-    // 更新内容显示
-    document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-    document.getElementById(tabName + 'Tab').classList.add('active');
-}
-
 // 添加单个商品
 async function addProduct() {
     const urlInput = document.getElementById('productUrl');
@@ -237,6 +226,7 @@ async function loadProducts() {
         
         if (response.ok) {
             productsData = data;
+            updateDashboardMetrics();
             renderTable();
         } else {
             showMessage('加载数据失败', 'error');
@@ -247,6 +237,29 @@ async function loadProducts() {
     }
 }
 
+// 同步页面顶部的监控指标与当前商品数据。
+function updateDashboardMetrics() {
+    // 获取监控商品数量节点。
+    const metricProductsEl = document.getElementById('metricProducts');
+    // 获取有货商品数量节点。
+    const metricInStockEl = document.getElementById('metricInStock');
+    // 获取缺货商品数量节点。
+    const metricOutOfStockEl = document.getElementById('metricOutOfStock');
+    // 获取商品记录数节点。
+    const recordCountEl = document.getElementById('recordCount');
+    // 计算当前商品总数。
+    const monitoredCount = productsData.length;
+    // 计算最近一次采集为有货的商品数量。
+    const inStockCount = productsData.filter(product => product.stockStatus === 'IN_STOCK').length;
+    // 计算最近一次采集为缺货的商品数量。
+    const outOfStockCount = productsData.filter(product => product.stockStatus === 'OUT_OF_STOCK').length;
+
+    if (metricProductsEl) metricProductsEl.textContent = formatNumber(monitoredCount);
+    if (metricInStockEl) metricInStockEl.textContent = formatNumber(inStockCount);
+    if (metricOutOfStockEl) metricOutOfStockEl.textContent = formatNumber(outOfStockCount);
+    if (recordCountEl) recordCountEl.textContent = `${monitoredCount} 条记录`;
+}
+
 // 渲染表格
 function renderTable() {
     const tbody = document.getElementById('productsTableBody');
@@ -254,7 +267,7 @@ function renderTable() {
     if (productsData.length === 0) {
         tbody.innerHTML = `
             <tr>
-                <td colspan="11" style="text-align: center; padding: 40px; color: #6c757d;">
+                <td colspan="6" style="text-align: center; padding: 40px; color: #6c757d;">
                     暂无数据，请添加商品链接开始监控
                 </td>
             </tr>
@@ -273,21 +286,15 @@ function renderTable() {
             <td class="stock-status ${String(product.stockStatus || 'UNKNOWN').toLowerCase()}">
                 ${formatStockStatus(product.stockStatus, product.stockReason)}
             </td>
-            <td class="sales-number">${formatNumber(product.product_total_sales || product.productSales || 0)}</td>
-            <td class="sales-number">${formatNumber(product.daily_product_sales || 0)}</td>
-            <td class="gmv">${formatPrice(product.daily_gmv || 0)}</td>
             <td>
                 <div class="shop-name" title="${product.shop_name || product.shopName || '未知店铺'}">
                     ${product.shop_name || product.shopName || '未知店铺'}
                 </div>
             </td>
-            <td class="sales-number">${formatNumber(product.shop_total_sales || product.shopSales || 0)}</td>
-            <td class="sales-number">${formatNumber(product.daily_shop_sales || 0)}</td>
             <td class="update-time">${formatTime(product.last_update)}</td>
             <td>
-                <button onclick="showTrendChart(${product.id})" class="btn btn-info btn-small">趋势</button>
+                <a href="${product.url}" target="_blank" rel="noopener noreferrer" class="btn btn-info btn-small" aria-label="查看${product.name || '商品'}">查看商品</a>
                 <button onclick="refreshProduct(${product.id})" class="btn btn-success btn-small">刷新</button>
-                <button onclick="downloadData(${product.id})" class="btn btn-info btn-small">下载</button>
                 <button onclick="deleteProduct(${product.id})" class="btn btn-danger btn-small">删除</button>
             </td>
         </tr>
@@ -303,13 +310,12 @@ function sortTable() {
         let aVal = a[sortBy];
         let bVal = b[sortBy];
         
-        // 处理特殊字段映射
-        if (sortBy === 'product_total_sales') {
-            aVal = a.product_total_sales || a.productSales || 0;
-            bVal = b.product_total_sales || b.productSales || 0;
-        } else if (sortBy === 'shop_total_sales') {
-            aVal = a.shop_total_sales || a.shopSales || 0;
-            bVal = b.shop_total_sales || b.shopSales || 0;
+        // 将库存状态映射为可排序的优先级。
+        if (sortBy === 'stockStatus') {
+            // 定义库存状态排序优先级，缺货商品排在前面便于处理。
+            const stockRank = { OUT_OF_STOCK: 2, UNKNOWN: 1, IN_STOCK: 0 };
+            aVal = stockRank[a.stockStatus] ?? stockRank.UNKNOWN;
+            bVal = stockRank[b.stockStatus] ?? stockRank.UNKNOWN;
         }
         
         // 处理null/undefined值
@@ -386,30 +392,31 @@ async function refreshAllData() {
     }
 }
 
-// 下载数据
-async function downloadData(productId) {
+// 测试当前邮件配置是否能够发送邮件。
+async function testEmail() {
+    // 显示邮件测试请求的加载状态。
+    showLoading();
+
     try {
-        const response = await fetch(`/api/products/${productId}/download`);
-        
+        // 调用后端邮件测试接口，向配置的收件人发送测试邮件。
+        const response = await fetch('/api/mail/test', {
+            method: 'POST'
+        });
+        // 读取后端返回的成功或错误信息。
+        const result = await response.json();
+
         if (response.ok) {
-            const blob = await response.blob();
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `商品销量数据_${new Date().toISOString().split('T')[0]}.xlsx`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            window.URL.revokeObjectURL(url);
-            
-            showMessage('数据下载成功', 'success');
+            showMessage(result.message || '测试邮件已发送，请检查收件箱', 'success');
         } else {
-            const result = await response.json();
-            showMessage(result.error || '下载失败', 'error');
+            showMessage(result.error || '测试邮件发送失败', 'error');
         }
     } catch (error) {
-        console.error('下载失败:', error);
-        showMessage('下载失败，请稍后重试', 'error');
+        // 处理接口不可用或网络异常。
+        console.error('测试邮件失败:', error);
+        showMessage('网络错误，请稍后重试', 'error');
+    } finally {
+        // 无论请求结果如何都关闭加载状态。
+        hideLoading();
     }
 }
 
@@ -448,11 +455,15 @@ document.getElementById('productUrl').addEventListener('keypress', function(e) {
 // 标签页切换功能
 function switchTab(tabName) {
     // 移除所有活动状态
-    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.classList.remove('active');
+        btn.setAttribute('aria-selected', 'false');
+    });
     document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-    
+
     // 激活选中的标签页
     event.target.classList.add('active');
+    event.target.setAttribute('aria-selected', 'true');
     document.getElementById(tabName + 'Tab').classList.add('active');
 }
 
@@ -463,171 +474,3 @@ function clearBatchInput() {
     document.getElementById('batchUrls').value = '';
     document.getElementById('batchProgress').style.display = 'none';
 }
-
-// 显示销量趋势图
-async function showTrendChart(productId) {
-    try {
-        showLoading();
-        
-        // 获取商品历史数据
-        const response = await fetch(`/api/products/${productId}/trend`);
-        const data = await response.json();
-        
-        if (!response.ok) {
-            showMessage(data.error || '获取趋势数据失败', 'error');
-            return;
-        }
-        
-        // 显示模态框
-        document.getElementById('trendModal').style.display = 'flex';
-        document.getElementById('trendTitle').textContent = `${data.productName} - 销量趋势`;
-        
-        // 更新统计信息
-        document.getElementById('totalSales').textContent = formatNumber(data.totalSales);
-        document.getElementById('avgDailySales').textContent = formatNumber(data.avgDailySales);
-        document.getElementById('maxDailySales').textContent = formatNumber(data.maxDailySales);
-        document.getElementById('monitorDays').textContent = data.monitorDays + ' 天';
-        
-        // 创建图表
-        createTrendChart(data.chartData);
-        
-    } catch (error) {
-        console.error('获取趋势数据失败:', error);
-        showMessage('网络错误，请稍后重试', 'error');
-    } finally {
-        hideLoading();
-    }
-}
-
-// 创建趋势图表
-let trendChartInstance = null;
-
-function createTrendChart(chartData) {
-    const ctx = document.getElementById('trendChart').getContext('2d');
-    
-    // 销毁之前的图表实例
-    if (trendChartInstance) {
-        trendChartInstance.destroy();
-    }
-    
-    trendChartInstance = new Chart(ctx, {
-        type: 'line',
-        data: {
-            labels: chartData.dates,
-            datasets: [{
-                label: '商品总销量',
-                data: chartData.totalSales,
-                borderColor: '#667eea',
-                backgroundColor: 'rgba(102, 126, 234, 0.1)',
-                borderWidth: 3,
-                fill: true,
-                tension: 0.4,
-                pointBackgroundColor: '#667eea',
-                pointBorderColor: '#fff',
-                pointBorderWidth: 2,
-                pointRadius: 5,
-                pointHoverRadius: 8
-            }, {
-                label: '日新增销量',
-                data: chartData.dailySales,
-                borderColor: '#28a745',
-                backgroundColor: 'rgba(40, 167, 69, 0.1)',
-                borderWidth: 2,
-                fill: false,
-                tension: 0.4,
-                pointBackgroundColor: '#28a745',
-                pointBorderColor: '#fff',
-                pointBorderWidth: 2,
-                pointRadius: 4,
-                pointHoverRadius: 6
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {
-                title: {
-                    display: true,
-                    text: '销量趋势分析',
-                    font: {
-                        size: 16,
-                        weight: 'bold'
-                    }
-                },
-                legend: {
-                    display: true,
-                    position: 'top'
-                },
-                tooltip: {
-                    mode: 'index',
-                    intersect: false,
-                    callbacks: {
-                        label: function(context) {
-                            return context.dataset.label + ': ' + formatNumber(context.parsed.y);
-                        }
-                    }
-                }
-            },
-            scales: {
-                x: {
-                    display: true,
-                    title: {
-                        display: true,
-                        text: '日期'
-                    },
-                    grid: {
-                        display: true,
-                        color: 'rgba(0,0,0,0.1)'
-                    }
-                },
-                y: {
-                    display: true,
-                    title: {
-                        display: true,
-                        text: '销量'
-                    },
-                    beginAtZero: true,
-                    grid: {
-                        display: true,
-                        color: 'rgba(0,0,0,0.1)'
-                    },
-                    ticks: {
-                        callback: function(value) {
-                            return formatNumber(value);
-                        }
-                    }
-                }
-            },
-            interaction: {
-                mode: 'nearest',
-                axis: 'x',
-                intersect: false
-            }
-        }
-    });
-}
-
-// 关闭趋势图模态框
-function closeTrendModal() {
-    document.getElementById('trendModal').style.display = 'none';
-    
-    // 销毁图表实例释放内存
-    if (trendChartInstance) {
-        trendChartInstance.destroy();
-        trendChartInstance = null;
-    }
-}
-
-// 点击模态框外部关闭
-document.getElementById('trendModal').addEventListener('click', function(e) {
-    if (e.target === this) {
-        closeTrendModal();
-    }
-});
-
-// ESC键关闭模态框
-document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape') {
-        closeTrendModal();
-    }
-});

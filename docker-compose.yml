@@ -14,6 +14,7 @@ services:
       - MAIL_SECURE=${MAIL_SECURE:-true}
       - MAIL_USERNAME=${MAIL_USERNAME}
       - MAIL_PASSWORD=${MAIL_PASSWORD}
+      - MAIL_RECIPIENTS=${MAIL_RECIPIENTS}
       - MAIL_RECIPIENT=${MAIL_RECIPIENT}
     volumes:
       - ./data:/app/data

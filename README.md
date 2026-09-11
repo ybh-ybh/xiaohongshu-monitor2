@@ -93,8 +93,10 @@ MAIL_PORT=465
 MAIL_SECURE=true
 MAIL_USERNAME=你的163邮箱
 MAIL_PASSWORD=你的163授权码
-MAIL_RECIPIENT=接收通知的邮箱
+MAIL_RECIPIENTS=收件人1@example.com,收件人2@example.com
 ```
+
+`MAIL_RECIPIENTS` 支持多个收件人，地址之间用英文逗号或分号分隔。为兼容旧配置，也可以继续使用单个 `MAIL_RECIPIENT`；当两者同时配置时优先使用 `MAIL_RECIPIENTS`。
 
 本地运行 `npm start` 时会自动加载 `.env`；修改配置后需要重启服务。
 
