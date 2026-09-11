@@ -1,11 +1,34 @@
 let productsData = [];
 
+// 保存原始 fetch 方法，统一处理会话过期响应。
+const nativeFetch = window.fetch.bind(window);
+// API 返回 401 时跳转登录页，避免用户停留在失效页面。
+window.fetch = async (...args) => {
+    // 发起原始请求并检查响应状态。
+    const response = await nativeFetch(...args);
+    if (response.status === 401) {
+        window.location.replace('/login.html');
+    }
+    return response;
+};
+
 // 页面加载时获取数据
 document.addEventListener('DOMContentLoaded', function() {
     loadProducts();
     loadSettings();
     updateViewFromHash();
 });
+
+// 注销当前管理员会话并返回登录页。
+async function logout() {
+    // 注销前不重复弹窗，避免退出操作被阻塞。
+    try {
+        await nativeFetch('/api/auth/logout', { method: 'POST' });
+    } finally {
+        // 无论服务端是否响应，都清理本地页面并回到登录页。
+        window.location.replace('/login.html');
+    }
+}
 
 // 根据地址栏锚点切换库存监控和设置页面。
 window.addEventListener('hashchange', updateViewFromHash);

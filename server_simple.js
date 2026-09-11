@@ -9,6 +9,7 @@ const path = require('path');
 const fs = require('fs');
 const https = require('https');
 const http = require('http');
+const crypto = require('crypto');
 const cron = require('node-cron');
 const nodemailer = require('nodemailer');
 
@@ -16,6 +17,31 @@ const nodemailer = require('nodemailer');
 require('dotenv').config();
 
 const app = express();
+// 读取登录用户名，生产环境必须通过环境变量设置。
+const AUTH_USERNAME = String(process.env.AUTH_USERNAME || '').trim();
+// 读取登录密码，生产环境必须通过环境变量设置。
+const AUTH_PASSWORD = String(process.env.AUTH_PASSWORD || '');
+// 读取登录 Cookie 有效期配置，默认 7 天。
+const configuredSessionTtlHours = Number.parseInt(process.env.AUTH_SESSION_TTL_HOURS || '168', 10);
+// 将非法或过短配置收敛到至少 5 分钟，避免 NaN 导致会话永不过期。
+const AUTH_SESSION_TTL_MS = Number.isFinite(configuredSessionTtlHours) && configuredSessionTtlHours > 0
+    ? Math.max(5 * 60 * 1000, configuredSessionTtlHours * 60 * 60 * 1000)
+    : 168 * 60 * 60 * 1000;
+// 保存当前进程中的登录会话，服务重启后会自动失效。
+const authSessions = new Map();
+// 保存登录失败次数，用于限制暴力尝试。
+const authFailures = new Map();
+// 登录 Cookie 名称固定，避免和业务数据命名冲突。
+const AUTH_COOKIE_NAME = 'xhs_monitor_session';
+// 登录失败窗口时长。
+const AUTH_FAILURE_WINDOW_MS = 15 * 60 * 1000;
+// 单个来源在失败窗口内允许的最大失败次数。
+const AUTH_MAX_FAILURES = 10;
+// 未配置凭据时直接拒绝启动，确保公网部署不会意外开放。
+if (!AUTH_USERNAME || !AUTH_PASSWORD) {
+    console.error('缺少 AUTH_USERNAME 或 AUTH_PASSWORD，服务拒绝启动。请先配置登录凭据。');
+    process.exit(1);
+}
 // 读取服务端口配置，未配置时使用 3001。
 const PORT = parseInt(process.env.PORT || '3001', 10);
 // 记录是否由用户显式指定端口，避免静默改变部署配置。
@@ -45,6 +71,137 @@ let browserLaunchPromise = null;
 
 // 中间件
 app.use(express.json());
+
+// 使用常量时间比较敏感字符串，减少密码比对的时序侧信道。
+function safeEqual(left, right) {
+    // 长度不同也执行一次哈希比较，避免直接暴露长度信息。
+    const leftHash = crypto.createHash('sha256').update(String(left)).digest();
+    const rightHash = crypto.createHash('sha256').update(String(right)).digest();
+    return crypto.timingSafeEqual(leftHash, rightHash);
+}
+
+// 解析请求头中的 Cookie。
+function parseCookies(cookieHeader) {
+    // 将 Cookie 文本拆分为键值对，并忽略格式异常项。
+    return String(cookieHeader || '').split(';').reduce((cookies, part) => {
+        const separator = part.indexOf('=');
+        if (separator <= 0) return cookies;
+        const key = part.slice(0, separator).trim();
+        const value = part.slice(separator + 1).trim();
+        try {
+            cookies[key] = decodeURIComponent(value);
+        } catch (error) {
+            // 忽略无法解码的 Cookie，后续按未登录处理。
+        }
+        return cookies;
+    }, {});
+}
+
+// 获取当前请求携带且仍有效的登录会话。
+function getAuthSession(req) {
+    // 从 Cookie 中取出会话令牌。
+    const token = parseCookies(req.headers.cookie)[AUTH_COOKIE_NAME];
+    if (!token) return null;
+    // 校验会话是否存在且未过期。
+    const session = authSessions.get(token);
+    if (!session || session.expiresAt <= Date.now()) {
+        authSessions.delete(token);
+        return null;
+    }
+    // 滑动更新过期时间，保持活跃用户登录状态。
+    session.expiresAt = Date.now() + AUTH_SESSION_TTL_MS;
+    return session;
+}
+
+// 判断请求是否来自登录页或健康检查等公开入口。
+function isPublicRequest(req) {
+    // 登录页所需静态资源保持公开，业务脚本和数据接口仍需登录。
+    const publicPaths = new Set(['/login.html', '/login.js', '/login.css', '/favicon.ico', '/health']);
+    return publicPaths.has(req.path) || (req.path === '/api/auth/login' && req.method === 'POST');
+}
+
+// 保护业务页面和 API，未登录请求统一返回 401 或跳转登录页。
+function requireAuth(req, res, next) {
+    // 公开入口无需会话校验。
+    if (isPublicRequest(req)) return next();
+    // 已登录请求继续访问业务资源。
+    if (getAuthSession(req)) return next();
+    // API 调用返回机器可读错误，页面访问跳转到登录页。
+    if (req.path.startsWith('/api/')) return res.status(401).json({ error: '请先登录' });
+    return res.redirect('/login.html');
+}
+
+// 清理过期会话和登录失败记录，避免内存持续增长。
+setInterval(() => {
+    // 删除已经过期的会话。
+    const now = Date.now();
+    for (const [token, session] of authSessions) {
+        if (session.expiresAt <= now) authSessions.delete(token);
+    }
+    // 删除已经离开失败窗口的来源记录。
+    for (const [key, failure] of authFailures) {
+        if (failure.resetAt <= now) authFailures.delete(key);
+    }
+}, 60 * 1000).unref();
+
+// 登录接口：校验凭据并签发 HttpOnly 会话 Cookie。
+app.post('/api/auth/login', (req, res) => {
+    // 按来源 IP 限制失败尝试，避免通过轮换用户名绕过限流。
+    const sourceKey = req.ip;
+    const now = Date.now();
+    const failure = authFailures.get(sourceKey);
+    if (failure && failure.resetAt > now && failure.count >= AUTH_MAX_FAILURES) {
+        return res.status(429).json({ error: '登录尝试过于频繁，请 15 分钟后再试' });
+    }
+
+    // 比对用户名和密码，不向客户端透露具体错误字段。
+    const usernameValid = safeEqual(req.body?.username || '', AUTH_USERNAME);
+    const passwordValid = safeEqual(req.body?.password || '', AUTH_PASSWORD);
+    if (!usernameValid || !passwordValid) {
+        const nextFailure = failure && failure.resetAt > now
+            ? { count: failure.count + 1, resetAt: failure.resetAt }
+            : { count: 1, resetAt: now + AUTH_FAILURE_WINDOW_MS };
+        authFailures.set(sourceKey, nextFailure);
+        return res.status(401).json({ error: '用户名或密码错误' });
+    }
+
+    // 登录成功后清除失败记录并创建不可预测的随机会话令牌。
+    authFailures.delete(sourceKey);
+    const token = crypto.randomBytes(32).toString('hex');
+    authSessions.set(token, { username: AUTH_USERNAME, expiresAt: now + AUTH_SESSION_TTL_MS });
+    const secureCookie = process.env.AUTH_COOKIE_SECURE === 'true' || (process.env.AUTH_COOKIE_SECURE !== 'false' && req.secure);
+    const cookieParts = [
+        `${AUTH_COOKIE_NAME}=${encodeURIComponent(token)}`,
+        'HttpOnly',
+        'Path=/',
+        'SameSite=Strict',
+        `Max-Age=${Math.floor(AUTH_SESSION_TTL_MS / 1000)}`
+    ];
+    if (secureCookie) cookieParts.push('Secure');
+    res.setHeader('Set-Cookie', cookieParts.join('; '));
+    return res.json({ message: '登录成功' });
+});
+
+// 查询当前登录状态，供前端恢复页面时使用。
+app.get('/api/auth/status', (req, res) => {
+    // 返回最小必要用户信息，不暴露会话令牌。
+    const session = getAuthSession(req);
+    if (!session) return res.status(401).json({ authenticated: false });
+    return res.json({ authenticated: true, username: session.username });
+});
+
+// 注销当前会话并清除浏览器 Cookie。
+app.post('/api/auth/logout', (req, res) => {
+    // 删除服务端会话，令旧令牌立即失效。
+    const token = parseCookies(req.headers.cookie)[AUTH_COOKIE_NAME];
+    if (token) authSessions.delete(token);
+    // 通过过期 Cookie 清除客户端凭据。
+    res.setHeader('Set-Cookie', `${AUTH_COOKIE_NAME}=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0`);
+    return res.json({ message: '已退出登录' });
+});
+
+// 在静态资源中间件前保护业务页面和文件。
+app.use(requireAuth);
 app.use(express.static('public'));
 
 // 数据文件路径

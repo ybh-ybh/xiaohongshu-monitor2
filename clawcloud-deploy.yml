@@ -25,6 +25,21 @@ spec:
           value: "production"
         - name: TZ
           value: "Asia/Shanghai"
+        # 以下登录变量请在 ClawCloud 控制台以 Secret/环境变量方式注入，不要把真实密码提交到仓库。
+        - name: AUTH_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: xiaohongshu-monitor-auth
+              key: username
+        - name: AUTH_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: xiaohongshu-monitor-auth
+              key: password
+        - name: AUTH_COOKIE_SECURE
+          value: "true"
+        - name: AUTH_SESSION_TTL_HOURS
+          value: "168"
         resources:
           requests:
             memory: "256Mi"

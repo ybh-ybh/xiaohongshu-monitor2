@@ -36,7 +36,7 @@ npm start
 .\start_clean.bat
 ```
 
-访问 http://localhost:3001 开始使用
+首次启动前请先在 `.env` 中配置 `AUTH_USERNAME` 和 `AUTH_PASSWORD`，服务未检测到这两个变量时会拒绝启动，避免误将未鉴权的管理后台暴露到公网。启动后访问 http://localhost:3001，会先进入登录页。
 
 ### Docker 运行
 
@@ -58,6 +58,7 @@ docker run -d \
 ```bash
 docker run -d \
   --name xiaohongshu-monitor \
+  --env-file ./.env \
   -p 3001:3001 \
   -v $(pwd)/data:/app/data \
   YOUR_USERNAME/xiaohongshu-monitor:latest
@@ -89,6 +90,10 @@ npm start
 HEADLESS=true
 CHECK_INTERVAL_MINUTES=5
 XHS_USER_DATA_DIR=./data/browser-profile
+AUTH_USERNAME=admin
+AUTH_PASSWORD=请替换为至少16位的随机强密码
+AUTH_COOKIE_SECURE=false
+AUTH_SESSION_TTL_HOURS=168
 MAIL_HOST=smtp.163.com
 MAIL_PORT=465
 MAIL_SECURE=true
@@ -100,6 +105,15 @@ MAIL_RECIPIENTS=收件人1@example.com,收件人2@example.com
 `MAIL_RECIPIENTS` 支持多个收件人，地址之间用英文逗号或分号分隔。为兼容旧配置，也可以继续使用单个 `MAIL_RECIPIENT`；当两者同时配置时优先使用 `MAIL_RECIPIENTS`。
 
 本地运行 `npm start` 时会自动加载 `.env`；修改配置后需要重启服务。
+
+### 管理后台登录
+
+- `AUTH_USERNAME`：管理后台登录用户名。
+- `AUTH_PASSWORD`：管理后台登录密码，建议使用密码管理器生成的随机强密码，不要提交到 Git。
+- `AUTH_COOKIE_SECURE`：HTTPS 访问时设为 `true`；本地使用 HTTP 调试时设为 `false`。未显式设置时，服务会根据请求是否为 HTTPS 自动判断。
+- `AUTH_SESSION_TTL_HOURS`：登录会话有效期，默认 168 小时（7 天）；服务重启后现有会话会失效。
+
+登录凭据只保存在环境变量中。登录失败会按来源限流，业务页面和 `/api/*` 接口均要求有效会话；`/health` 保持公开，供 Docker/Kubernetes 健康检查使用。生产环境还应通过反向代理启用 HTTPS，并避免直接把容器端口暴露到公网。
 
 启动服务后可用下面接口验证邮件配置：
 
@@ -202,6 +216,9 @@ curl http://localhost:3001/health
 - `NODE_ENV`: 运行环境 (development/production)
 - `PORT`: 服务端口 (默认: 3001)
 - `TZ`: 时区设置 (默认: Asia/Shanghai)
+- `AUTH_USERNAME` / `AUTH_PASSWORD`: 管理后台登录凭据（必填）
+- `AUTH_COOKIE_SECURE`: 是否为登录 Cookie 启用 Secure（HTTPS 生产环境建议 `true`）
+- `AUTH_SESSION_TTL_HOURS`: 登录会话有效期（小时，默认 168）
 
 ### 数据存储
 

@@ -138,5 +138,236 @@
     "shop_sales": 367000,
     "crawl_date": "2026-09-11",
     "crawl_time": "2026-09-11T17:37:45.906Z"
+  },
+  {
+    "product_id": 5,
+    "product_sales": 11000,
+    "shop_sales": 367000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T17:40:40.528Z"
+  },
+  {
+    "product_id": 5,
+    "product_sales": 11000,
+    "shop_sales": 367000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T17:45:41.057Z"
+  },
+  {
+    "product_id": 5,
+    "product_sales": 11000,
+    "shop_sales": 367000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T17:50:40.111Z"
+  },
+  {
+    "product_id": 1,
+    "product_sales": 294,
+    "shop_sales": 8403,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T17:55:07.981Z"
+  },
+  {
+    "product_id": 2,
+    "product_sales": 4690,
+    "shop_sales": 20000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T17:55:16.155Z"
+  },
+  {
+    "product_id": 5,
+    "product_sales": 11000,
+    "shop_sales": 367000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T17:55:40.791Z"
+  },
+  {
+    "product_id": 1,
+    "product_sales": 294,
+    "shop_sales": 8403,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:00:06.842Z"
+  },
+  {
+    "product_id": 2,
+    "product_sales": 4690,
+    "shop_sales": 20000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:00:15.100Z"
+  },
+  {
+    "product_id": 3,
+    "product_sales": 28000,
+    "shop_sales": 34000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:00:23.150Z"
+  },
+  {
+    "product_id": 4,
+    "product_sales": 18000,
+    "shop_sales": 19000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:00:31.595Z"
+  },
+  {
+    "product_id": 5,
+    "product_sales": 11000,
+    "shop_sales": 367000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:00:39.858Z"
+  },
+  {
+    "product_id": 6,
+    "product_sales": 5371,
+    "shop_sales": 20000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:00:48.053Z"
+  },
+  {
+    "product_id": 1,
+    "product_sales": 294,
+    "shop_sales": 8403,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:05:06.621Z"
+  },
+  {
+    "product_id": 2,
+    "product_sales": 4690,
+    "shop_sales": 20000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:05:14.787Z"
+  },
+  {
+    "product_id": 3,
+    "product_sales": 28000,
+    "shop_sales": 34000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:05:23.375Z"
+  },
+  {
+    "product_id": 4,
+    "product_sales": 18000,
+    "shop_sales": 19000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:05:31.727Z"
+  },
+  {
+    "product_id": 5,
+    "product_sales": 11000,
+    "shop_sales": 367000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:05:39.888Z"
+  },
+  {
+    "product_id": 6,
+    "product_sales": 5371,
+    "shop_sales": 20000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:05:48.344Z"
+  },
+  {
+    "product_id": 7,
+    "product_sales": 1239,
+    "shop_sales": 178000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:05:56.475Z"
+  },
+  {
+    "product_id": 1,
+    "product_sales": 294,
+    "shop_sales": 8403,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:10:06.396Z"
+  },
+  {
+    "product_id": 2,
+    "product_sales": 4690,
+    "shop_sales": 20000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:10:14.592Z"
+  },
+  {
+    "product_id": 3,
+    "product_sales": 28000,
+    "shop_sales": 34000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:10:22.776Z"
+  },
+  {
+    "product_id": 4,
+    "product_sales": 18000,
+    "shop_sales": 19000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:10:31.839Z"
+  },
+  {
+    "product_id": 5,
+    "product_sales": 11000,
+    "shop_sales": 367000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:10:40.019Z"
+  },
+  {
+    "product_id": 6,
+    "product_sales": 5371,
+    "shop_sales": 20000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:10:48.680Z"
+  },
+  {
+    "product_id": 7,
+    "product_sales": 1239,
+    "shop_sales": 178000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:10:56.814Z"
+  },
+  {
+    "product_id": 1,
+    "product_sales": 294,
+    "shop_sales": 8403,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:15:06.265Z"
+  },
+  {
+    "product_id": 2,
+    "product_sales": 4690,
+    "shop_sales": 20000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:15:14.431Z"
+  },
+  {
+    "product_id": 3,
+    "product_sales": 28000,
+    "shop_sales": 34000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:15:22.564Z"
+  },
+  {
+    "product_id": 4,
+    "product_sales": 18000,
+    "shop_sales": 19000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:15:30.952Z"
+  },
+  {
+    "product_id": 5,
+    "product_sales": 11000,
+    "shop_sales": 367000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:15:39.174Z"
+  },
+  {
+    "product_id": 6,
+    "product_sales": 5371,
+    "shop_sales": 20000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:15:47.382Z"
+  },
+  {
+    "product_id": 7,
+    "product_sales": 1239,
+    "shop_sales": 178000,
+    "crawl_date": "2026-09-11",
+    "crawl_time": "2026-09-11T18:15:55.655Z"
   }
 ]

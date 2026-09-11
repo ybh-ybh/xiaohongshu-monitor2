@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#f5f6f8">
+    <title>登录 - XHS Pulse</title>
+    <link rel="stylesheet" href="login.css">
+</head>
+<body>
+    <main class="login-shell">
+        <section class="login-panel" aria-labelledby="loginTitle">
+            <div class="brand-mark" aria-hidden="true">◔</div>
+            <p class="eyebrow">XHS PULSE</p>
+            <h1 id="loginTitle">登录监控系统</h1>
+            <p class="login-description">请输入管理员账号以继续访问。</p>
+            <form id="loginForm" class="login-form">
+                <label for="username">用户名</label>
+                <input id="username" name="username" type="text" autocomplete="username" required autofocus>
+                <label for="password">密码</label>
+                <input id="password" name="password" type="password" autocomplete="current-password" required>
+                <p id="loginError" class="login-error" role="alert" hidden></p>
+                <button id="loginButton" type="submit">登录</button>
+            </form>
+        </section>
+    </main>
+    <script src="login.js"></script>
+</body>
+</html>
