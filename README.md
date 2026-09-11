@@ -42,7 +42,7 @@ npm start
 
 ```bash
 # 构建镜像
-docker build -t xiaohongshu-monitor .
+docker build --no-cache -t xiaohongshu-monitor .
 
 # 运行容器
 docker run -d \

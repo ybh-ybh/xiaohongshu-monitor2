@@ -7,6 +7,7 @@ const express = require('express');
 const puppeteer = require('puppeteer');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const https = require('https');
 const http = require('http');
 const crypto = require('crypto');
@@ -68,6 +69,76 @@ let mailTransporter = null;
 let browserInstance = null;
 // 保存正在进行的浏览器启动 Promise，避免并发重复启动。
 let browserLaunchPromise = null;
+
+// 清理上一次 Chromium 异常退出或跨主机复制留下的 profile 锁文件。
+function clearStaleBrowserProfileLocks() {
+    // Chromium 使用这三个文件标记用户数据目录的独占锁。
+    const lockFileNames = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
+    // 获取当前运行环境的主机名，用于识别跨主机遗留锁。
+    const currentHostname = os.hostname();
+    // 读取主锁文件指向的主机和进程信息。
+    let lockTarget = null;
+
+    try {
+        // 主锁通常是指向“主机名-PID”的符号链接。
+        const lockPath = path.join(USER_DATA_DIR, 'SingletonLock');
+        const lockStats = fs.lstatSync(lockPath);
+        if (lockStats.isSymbolicLink()) {
+            lockTarget = fs.readlinkSync(lockPath);
+        }
+    } catch (error) {
+        // 没有锁文件时无需处理；其他读取异常交给 Chromium 返回明确错误。
+        if (error.code !== 'ENOENT') {
+            console.warn('检查 Chromium profile 锁文件失败:', error.message);
+        }
+        return false;
+    }
+
+    // 无法解析锁归属时不主动删除，避免误伤仍在运行的 Chromium。
+    if (!lockTarget) return false;
+    // 从锁目标中拆出主机名和 Chromium 进程 PID。
+    const lockMatch = String(lockTarget).match(/^(.*)-(\d+)$/);
+    if (!lockMatch) return false;
+    // 读取锁文件记录的主机名。
+    const lockHostname = lockMatch[1];
+    // 读取锁文件记录的进程号。
+    const lockPid = Number.parseInt(lockMatch[2], 10);
+    // 只有跨主机锁，或同主机但对应进程已退出时，才视为遗留锁。
+    let staleLock = lockHostname !== currentHostname;
+    if (!staleLock && Number.isInteger(lockPid) && lockPid > 0) {
+        try {
+            // 仅探测进程是否存在，不向目标进程发送实际信号。
+            process.kill(lockPid, 0);
+        } catch (error) {
+            // ESRCH 表示进程已退出；其他错误按无法确认处理并保留锁。
+            staleLock = error.code === 'ESRCH';
+        }
+    }
+    if (!staleLock) return false;
+
+    // 只删除文件或符号链接，不递归删除 profile 目录中的其他内容。
+    let removed = false;
+    for (const lockFileName of lockFileNames) {
+        // 计算当前待清理锁文件的完整路径。
+        const lockPath = path.join(USER_DATA_DIR, lockFileName);
+        try {
+            // 通过 lstat 避免跟随 SingletonSocket 指向 profile 外部目标。
+            const lockStats = fs.lstatSync(lockPath);
+            if (!lockStats.isFile() && !lockStats.isSymbolicLink()) continue;
+            fs.unlinkSync(lockPath);
+            removed = true;
+        } catch (error) {
+            // 某个锁文件不存在或已被 Chromium 自己清理时继续处理其他文件。
+            if (error.code !== 'ENOENT') {
+                console.warn(`清理 Chromium 锁文件 ${lockFileName} 失败:`, error.message);
+            }
+        }
+    }
+    if (removed) {
+        console.warn(`已清理遗留的 Chromium profile 锁（来源: ${lockTarget}）。`);
+    }
+    return removed;
+}
 
 // 中间件
 app.use(express.json());
@@ -266,6 +337,9 @@ async function launchBrowser() {
     // 使用统一的浏览器配置，保证短链接解析和商品抓取共享登录状态。
     if (browserInstance) return browserInstance;
     if (browserLaunchPromise) return browserLaunchPromise;
+    // 启动前清理可确认已经失效的 Chromium profile 锁，兼容容器迁移和异常退出。
+    clearStaleBrowserProfileLocks();
+    // 保存启动 Promise，令同一时刻的多个请求共享一次 Chromium 启动过程。
     browserLaunchPromise = puppeteer.launch({
         headless: HEADLESS ? 'new' : false,
         protocolTimeout: 60000,
