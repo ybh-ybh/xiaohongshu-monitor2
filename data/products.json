@@ -58,5 +58,31 @@
     "shopName": "自明-紫砂美学",
     "shopSales": 17000,
     "created_at": "2025-07-20T03:49:11.848Z"
+  },
+  {
+    "id": 7,
+    "url": "https://www.xiaohongshu.com/goods-detail/69523816ac83a20001603144?xsec_token=XBbQj87ofmRrZ7dPNkIT-BJ2p1XDiGaZicY_o0kj4JIRo%3D&xsec_source=app_share&instation_link=xhsdiscover%3A%2F%2Fgoods_detail%2F69523816ac83a20001603144%3Ftrade_ext%3DeyJjaGFubmVsSW5mbyI6eyJjaGFubmVsIjoic2hhcmVfb3V0c2lkZSIsImV4dHJhSW5mbyI6bnVsbH0sImRzVG9rZW5JbmZvIjpudWxsLCJzaGFyZUxpbmsiOiJodHRwczovL3d3dy54aWFvaG9uZ3NodS5jb20vZ29vZHMtZGV0YWlsLzY5NTIzODE2YWM4M2EyMDAwMTYwMzE0ND9hcHB1aWQ9NWYwOWRhOTIwMDAwMDAwMDAxMDFmZTAwIiwic3B1SW5mbyI6bnVsbCwibGl2ZUluZm8iOm51bGwsImdvb2RzTm90ZUlEbmZvIjpudWxsLCJjaGF0SW5mbyI6bnVsbCwic2VhcmNoSW5mbyI6bnVsbCwicHJlZmVyIjpudWxsfQ%3D%3D%26rate_limit_meta%3DitemId%253D69523816ac83a20001603128%26source%3D%26back_chain_id%3Dgoods_detail_share%26rn%3Dtrue&xhsshare=&appuid=5f09da9200000000000101fe00&apptime=1789131580&share_id=dec8d282e6d7473394899534fc0da4a4&share_channel=copy_link",
+    "name": "滇品客 · 安格斯薄脆牛肉脆片风干牛脆脆即食牛排脆片休闲解馋小零食 · 【1袋】五香味",
+    "price": 11.9,
+    "productSales": 1237,
+    "shopName": "未知店铺",
+    "shopSales": 178000,
+    "stockStatus": "IN_STOCK",
+    "stockReason": "加入购物车",
+    "created_at": "2026-09-11T13:45:31.511Z",
+    "last_checked_at": "2026-09-11T15:00:07.119Z"
+  },
+  {
+    "id": 8,
+    "url": "https://www.xiaohongshu.com/goods-detail/6899ac95f827fc00018bdb0a?xsec_token=XBtnXjruU7HKMg0xVZ7SkBJVziMCPLFyiHapbpzhAWMDs=&xsec_source=app_share&instation_link=xhsdiscover%3A%2F%2Fgoods_detail%2F6899ac95f827fc00018bdb0a%3Ftrade_ext%3DeyJjaGFubmVsSW5mbyI6eyJjaGFubmVsIjoic2hhcmVfb3V0c2lkZSIsImV4dHJhSW5mbyI6bnVsbH0sImRzVG9rZW5JbmZvIjpudWxsLCJzaGFyZUxpbmsiOiJodHRwczovL3d3dy54aWFvaG9uZ3NodS5jb20vZ29vZHMtZGV0YWlsLzY4OTlhYzk1ZjgyN2ZjMDAwMThiZGIwYT9hcHB1aWQ9NjQwZjBhMTMwMDAwMDAwMDI5MDExNmI0Iiwic3B1SW5mbyI6bnVsbCwibGl2ZUluZm8iOm51bGwsInNob3BJbmZvIjpudWxsLCJjaGF0SW5mbyI6bnVsbCwibG9vZHNOb3RlSW5mbyI6bnVsbCwic2VhcmNoSW5mbyI6bnVsbH0%3D%26rate_limit_meta%3DitemId%253D6899ac95f827fc00018bdb06%26source%3D%26back_chain_id%3Dgoods_detail_share%26rn%3Dtrue&share_id=14272d845dfc4d07927502183e3aed9e&share_channel=wechat",
+    "name": "佳能 · SX740HS相机 高清旅游家用摄影数码卡片相机 PowerShot SX740 HS · 银色",
+    "price": 3999,
+    "productSales": 6,
+    "shopName": "佳能Canon无锡全友摄影",
+    "shopSales": 45,
+    "stockStatus": "OUT_OF_STOCK",
+    "stockReason": "已售罄",
+    "created_at": "2026-09-11T13:47:55.069Z",
+    "last_checked_at": "2026-09-11T15:00:15.224Z"
   }
 ]

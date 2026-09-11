@@ -1,4 +1,4 @@
-# 小红书商品销量监控系统 v2.0
+# 小红书商品库存与销量监控系统
 
 [![Build Status](https://github.com/baiqunfan/rxiaohongshu-monitor2/workflows/Build%20and%20Deploy%20to%20Docker%20Hub/badge.svg)](https://github.com/baiqunfan/rxiaohongshu-monitor2/actions)
 [![Docker Pulls](https://img.shields.io/docker/pulls/baiqunfan/rxiaohongshu-monitor2)](https://hub.docker.com/r/baiqunfan/rxiaohongshu-monitor2)
@@ -14,7 +14,9 @@
 - 🌐 **Web界面**: 美观易用的管理界面
 - ☁️ **云端部署**: 支持 Docker 容器化部署
 - 💾 **数据持久化**: 自动保存历史数据，重启不丢失
-- ⏰ **定时任务**: 每小时自动刷新所有商品数据
+- 📦 **库存监控**: 识别商品页“已售罄/无货”和“立即购买/加入购物车”等状态
+- ✉️ **补货通知**: 仅在 `OUT_OF_STOCK -> IN_STOCK` 时发送邮件，避免重复打扰
+- ⏰ **定时任务**: 默认每 5 分钟刷新，可通过环境变量调整
 
 ## 🚀 快速开始
 
@@ -34,7 +36,7 @@ npm start
 .\start_clean.bat
 ```
 
-访问 http://localhost:3000 开始使用
+访问 http://localhost:3001 开始使用
 
 ### Docker 运行
 
@@ -45,7 +47,7 @@ docker build -t xiaohongshu-monitor .
 # 运行容器
 docker run -d \
   --name xiaohongshu-monitor \
-  -p 3000:3000 \
+  -p 3001:3001 \
   -v $(pwd)/data:/app/data \
   xiaohongshu-monitor
 ```
@@ -55,7 +57,7 @@ docker run -d \
 ```bash
 docker run -d \
   --name xiaohongshu-monitor \
-  -p 3000:3000 \
+  -p 3001:3001 \
   -v $(pwd)/data:/app/data \
   YOUR_USERNAME/xiaohongshu-monitor:latest
 ```
@@ -68,6 +70,41 @@ docker run -d \
 2. 点击分享 → 复制链接
 3. 在监控系统中点击"添加商品"
 4. 粘贴链接，系统会自动提取商品信息
+
+首次使用建议先以有头模式启动一次完成小红书登录。登录态保存在 `data/browser-profile`，后续无头定时任务会复用该登录态：
+
+```powershell
+$env:HEADLESS="false"
+npm start
+```
+
+登录完成后停止服务，再用 `HEADLESS=true` 运行监控。
+
+### 邮件配置
+
+不要把邮箱密码写入代码或提交到 Git。复制 `.env.example` 为项目根目录的 `.env`（该文件已加入 `.gitignore`），再填入你自己的邮箱配置：
+
+```text
+HEADLESS=true
+CHECK_INTERVAL_MINUTES=5
+XHS_USER_DATA_DIR=./data/browser-profile
+MAIL_HOST=smtp.163.com
+MAIL_PORT=465
+MAIL_SECURE=true
+MAIL_USERNAME=你的163邮箱
+MAIL_PASSWORD=你的163授权码
+MAIL_RECIPIENT=接收通知的邮箱
+```
+
+本地运行 `npm start` 时会自动加载 `.env`；修改配置后需要重启服务。
+
+启动服务后可用下面接口验证邮件配置：
+
+```bash
+curl -X POST http://localhost:3001/api/mail/test
+```
+
+163 邮箱通常要求使用“客户端授权码”，不是网页登录密码。邮件通知只在明确检测到缺货恢复有货时触发；首次采集不会发送补货邮件。库存无法确认时会显示为 `UNKNOWN`/“待确认”，不会当作有货。
 
 ### 支持的链接格式
 
@@ -142,7 +179,7 @@ npm run fix-names
 系统提供健康检查端点：`/health`
 
 ```bash
-curl http://localhost:3000/health
+curl http://localhost:3001/health
 ```
 
 ### 数据备份
@@ -160,7 +197,7 @@ curl http://localhost:3000/health
 ### 环境变量
 
 - `NODE_ENV`: 运行环境 (development/production)
-- `PORT`: 服务端口 (默认: 3000)
+- `PORT`: 服务端口 (默认: 3001)
 - `TZ`: 时区设置 (默认: Asia/Shanghai)
 
 ### 数据存储
@@ -169,10 +206,12 @@ curl http://localhost:3000/health
 - `data/sales_data.json`: 销量历史数据
 - `data/config.json`: 系统配置
 
+商品记录还会保存 `stockStatus`、`stockReason`、`last_restock_at` 和 `last_notification_sent_at`，便于审计库存变化。
+
 ## 🚨 注意事项
 
 - 请合理使用，避免频繁请求导致IP被限制
-- 建议设置合适的刷新间隔（默认1小时）
+- 建议设置合适的刷新间隔（默认5分钟），过于频繁可能触发验证码或访问限制
 - 云端部署时注意配置持久化存储
 - 定期备份重要数据
 

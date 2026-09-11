@@ -24,7 +24,7 @@ function showMessage(text, type = 'info') {
     
     setTimeout(() => {
         messageEl.style.display = 'none';
-    }, 3000);
+    }, 3001);
 }
 
 // 格式化数字
@@ -37,6 +37,18 @@ function formatNumber(num) {
 function formatPrice(price) {
     if (price === null || price === undefined) return '¥0';
     return `¥${price.toFixed(2)}`;
+}
+
+// 将库存状态转换为页面可读文本，并保留检测依据提示。
+function formatStockStatus(status, reason) {
+    // UNKNOWN 不展示为“有货”，避免因页面结构变化误导抢购。
+    const labels = {
+        IN_STOCK: '有货',
+        OUT_OF_STOCK: '无货',
+        UNKNOWN: '待确认'
+    };
+    const label = labels[status] || labels.UNKNOWN;
+    return `<span title="${reason || '未找到明确库存依据'}">${label}</span>`;
 }
 
 // 格式化时间
@@ -242,7 +254,7 @@ function renderTable() {
     if (productsData.length === 0) {
         tbody.innerHTML = `
             <tr>
-                <td colspan="10" style="text-align: center; padding: 40px; color: #6c757d;">
+                <td colspan="11" style="text-align: center; padding: 40px; color: #6c757d;">
                     暂无数据，请添加商品链接开始监控
                 </td>
             </tr>
@@ -258,6 +270,9 @@ function renderTable() {
                 </div>
             </td>
             <td class="price">${formatPrice(product.price)}</td>
+            <td class="stock-status ${String(product.stockStatus || 'UNKNOWN').toLowerCase()}">
+                ${formatStockStatus(product.stockStatus, product.stockReason)}
+            </td>
             <td class="sales-number">${formatNumber(product.product_total_sales || product.productSales || 0)}</td>
             <td class="sales-number">${formatNumber(product.daily_product_sales || 0)}</td>
             <td class="gmv">${formatPrice(product.daily_gmv || 0)}</td>

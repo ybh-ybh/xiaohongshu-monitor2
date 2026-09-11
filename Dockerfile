@@ -14,7 +14,8 @@ RUN apk add --no-cache \
 
 # 设置 Puppeteer 使用系统安装的 Chromium
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser \
+    HEADLESS=true
 
 # 设置工作目录
 WORKDIR /app
@@ -36,11 +37,11 @@ RUN chown -R node:node /app
 USER node
 
 # 暴露端口
-EXPOSE 3000
+EXPOSE 3001
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD node -e "require('http').get('http://localhost:3000/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"
+    CMD node -e "require('http').get('http://localhost:3001/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"
 
 # 启动应用
 CMD ["node", "server_simple.js"]

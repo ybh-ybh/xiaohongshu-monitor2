@@ -629,3 +629,8 @@ body {
         gap: 10px;
     }
 }
+
+/* 库存状态颜色：有货绿色、无货红色、待确认灰色。 */
+.stock-status.in_stock { color: #198754; font-weight: 600; }
+.stock-status.out_of_stock { color: #dc3545; font-weight: 600; }
+.stock-status.unknown { color: #6c757d; font-weight: 600; }

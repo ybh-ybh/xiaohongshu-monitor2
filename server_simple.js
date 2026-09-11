@@ -10,9 +10,30 @@ const fs = require('fs');
 const https = require('https');
 const http = require('http');
 const cron = require('node-cron');
+const nodemailer = require('nodemailer');
+
+// 启动时加载项目根目录的 .env，支持本地 npm start 使用邮件配置。
+require('dotenv').config();
 
 const app = express();
-const PORT = 3000;
+// 读取服务端口配置，未配置时使用 3001。
+const PORT = parseInt(process.env.PORT || '3001', 10);
+// 读取轮询间隔配置，默认每 5 分钟检查一次。
+const CHECK_INTERVAL_MINUTES = Math.max(1, parseInt(process.env.CHECK_INTERVAL_MINUTES || '5', 10));
+// 读取是否使用无头浏览器的配置。
+const HEADLESS = String(process.env.HEADLESS || 'true').toLowerCase() !== 'false';
+// 保存浏览器登录态的目录，避免每次抓取都重新登录。
+const USER_DATA_DIR = process.env.XHS_USER_DATA_DIR || path.join(__dirname, 'data', 'browser-profile');
+// 缺货文案只用于库存判断，不包含“已售”等销量文案。
+const OUT_OF_STOCK_WORDS = ['已售罄', '售罄', '暂时无货', '暂无库存', '库存不足', '缺货', '补货通知', '到货通知', '无法购买', '不可购买'];
+// 可购买控件文案用于确认商品当前可能有货。
+const IN_STOCK_WORDS = ['立即购买', '马上抢', '立即抢购', '加入购物车', '去购买', '购买'];
+// 缓存邮件发送器，避免每次通知重复创建连接配置。
+let mailTransporter = null;
+// 复用单个浏览器实例，避免同一登录目录被多个 Chromium 进程锁定。
+let browserInstance = null;
+// 保存正在进行的浏览器启动 Promise，避免并发重复启动。
+let browserLaunchPromise = null;
 
 // 中间件
 app.use(express.json());
@@ -29,11 +50,133 @@ if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR);
     console.log('创建数据目录:', DATA_DIR);
 }
+// 创建浏览器登录态目录。
+if (!fs.existsSync(USER_DATA_DIR)) {
+    fs.mkdirSync(USER_DATA_DIR, { recursive: true });
+}
 
 // 数据存储
 let products = [];
 let salesData = [];
 let nextId = 1;
+// 防止定时任务与手动刷新同时执行造成浏览器和数据文件竞争。
+let refreshInProgress = false;
+
+// 将环境变量文本转换为布尔值。
+function envBoolean(name, defaultValue) {
+    // 读取指定环境变量并兼容常见布尔值写法。
+    const value = process.env[name];
+    if (value === undefined) return defaultValue;
+    return ['1', 'true', 'yes', 'y', 'on'].includes(String(value).toLowerCase());
+}
+
+// 创建带持久化登录态的 Puppeteer 浏览器实例。
+async function launchBrowser() {
+    // 使用统一的浏览器配置，保证短链接解析和商品抓取共享登录状态。
+    if (browserInstance) return browserInstance;
+    if (browserLaunchPromise) return browserLaunchPromise;
+    browserLaunchPromise = puppeteer.launch({
+        headless: HEADLESS ? 'new' : false,
+        protocolTimeout: 60000,
+        userDataDir: USER_DATA_DIR,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--disable-features=VizDisplayCompositor',
+            '--no-first-run',
+            '--no-zygote',
+            '--disable-extensions'
+        ],
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH || undefined
+    }).then(browser => {
+        browserInstance = browser;
+        browser.on('disconnected', () => {
+            // 浏览器异常断开时清理缓存，下一次任务可以重新启动。
+            browserInstance = null;
+        });
+        return browser;
+    }).finally(() => {
+        // 启动完成后释放并发启动锁。
+        browserLaunchPromise = null;
+    });
+    return browserLaunchPromise;
+}
+
+// 在服务退出时关闭共享浏览器实例。
+async function closeBrowser() {
+    // 只在浏览器确实启动过时执行关闭。
+    if (browserInstance) {
+        await browserInstance.close();
+        browserInstance = null;
+    }
+}
+
+// 创建邮件传输器；未配置密码时返回空值并跳过邮件发送。
+function getMailTransporter() {
+    // 邮件配置全部来自环境变量，避免将密码写入代码或数据文件。
+    const username = process.env.MAIL_USERNAME;
+    const password = process.env.MAIL_PASSWORD;
+    if (!username || !password) return null;
+    if (!mailTransporter) {
+        mailTransporter = nodemailer.createTransport({
+            host: process.env.MAIL_HOST || 'smtp.163.com',
+            port: parseInt(process.env.MAIL_PORT || '465', 10),
+            secure: envBoolean('MAIL_SECURE', true),
+            auth: { user: username, pass: password }
+        });
+    }
+    return mailTransporter;
+}
+
+// 发送商品恢复库存通知邮件。
+async function sendRestockEmail(product, productData) {
+    // 未配置邮件账号时只记录日志，不阻断商品监控任务。
+    const transporter = getMailTransporter();
+    const recipient = process.env.MAIL_RECIPIENT;
+    if (!transporter || !recipient) {
+        console.warn('未配置完整邮件参数，跳过补货邮件通知。');
+        return false;
+    }
+    // 发送包含商品名称、价格、库存状态和直达链接的邮件。
+    await transporter.sendMail({
+        from: process.env.MAIL_USERNAME,
+        to: recipient,
+        subject: `小红书商品补货提醒：${productData.name || product.name || '未知商品'}`,
+        text: [
+            '检测到小红书商品可能已补货。',
+            `商品：${productData.name || product.name || '未知商品'}`,
+            `价格：${productData.price || product.price || '未知'}`,
+            `库存状态：${productData.stockStatus}`,
+            `检测依据：${productData.stockReason || '可购买控件'}`,
+            `链接：${product.url}`
+        ].join('\n')
+    });
+    console.log(`补货邮件已发送: ${product.url}`);
+    return true;
+}
+
+// 写入最新商品数据，并在缺货恢复有货时发送一次邮件。
+async function applyProductData(product, productData) {
+    // 仅把明确的 OUT_OF_STOCK -> IN_STOCK 迁移视为补货事件。
+    const previousStockStatus = product.stockStatus || 'UNKNOWN';
+    Object.assign(product, productData, { last_checked_at: new Date().toISOString() });
+    const restocked = previousStockStatus === 'OUT_OF_STOCK' && productData.stockStatus === 'IN_STOCK';
+    if (restocked) {
+        try {
+            product.last_restock_at = new Date().toISOString();
+            const notificationSent = await sendRestockEmail(product, productData);
+            if (notificationSent) {
+                product.last_notification_sent_at = new Date().toISOString();
+            }
+        } catch (error) {
+            // 邮件失败只记录错误，不能让后续商品停止监控。
+            console.error(`补货邮件发送失败: ${error.message}`);
+        }
+    }
+    return restocked;
+}
 
 // 加载数据
 function loadData() {
@@ -98,30 +241,12 @@ loadData();
 async function resolveShortUrl(shortUrl) {
     console.log('开始解析短链接:', shortUrl);
 
-    const browser = await puppeteer.launch({
-        headless: 'new',
-        protocolTimeout: 60000, // 增加协议超时时间
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-gpu',
-            '--disable-web-security',
-            '--disable-features=VizDisplayCompositor',
-            '--no-first-run',
-            '--no-zygote',
-            '--single-process',
-            '--disable-extensions',
-            '--disable-background-timer-throttling',
-            '--disable-backgrounding-occluded-windows',
-            '--disable-renderer-backgrounding',
-            '--memory-pressure-off'
-        ],
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined
-    });
+    // 使用统一浏览器实例以复用小红书登录态。
+    const browser = await launchBrowser();
 
+    let page = null;
     try {
-        const page = await browser.newPage();
+        page = await browser.newPage();
 
         // 设置更真实的浏览器环境
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
@@ -181,7 +306,7 @@ async function resolveShortUrl(shortUrl) {
                         timeout: 8000
                     });
                     // 等待一下让重定向完成
-                    await page.waitForTimeout(3000);
+                    await page.waitForTimeout(3001);
                     finalUrl = page.url();
                     console.log('方法3成功，获取到URL:', finalUrl);
                 } catch (error3) {
@@ -214,7 +339,8 @@ async function resolveShortUrl(shortUrl) {
         // 解析失败时返回原URL
         return shortUrl;
     } finally {
-        await browser.close();
+        // 只关闭当前页面，浏览器实例继续供其他任务复用。
+        if (page) await page.close();
     }
 }
 
@@ -282,30 +408,12 @@ function parseSalesNumber(salesText) {
 async function scrapeProductData(url) {
     console.log('开始爬取商品数据:', url);
 
-    const browser = await puppeteer.launch({
-        headless: 'new',
-        protocolTimeout: 60000, // 增加协议超时时间
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-gpu',
-            '--disable-web-security',
-            '--disable-features=VizDisplayCompositor',
-            '--no-first-run',
-            '--no-zygote',
-            '--single-process',
-            '--disable-extensions',
-            '--disable-background-timer-throttling',
-            '--disable-backgrounding-occluded-windows',
-            '--disable-renderer-backgrounding',
-            '--memory-pressure-off'
-        ],
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH || undefined
-    });
+    // 使用统一浏览器实例以复用小红书登录态。
+    const browser = await launchBrowser();
 
+    let page = null;
     try {
-        const page = await browser.newPage();
+        page = await browser.newPage();
 
         // 设置用户代理
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
@@ -546,17 +654,35 @@ async function scrapeProductData(url) {
 
             // 使用提取到的信息，优先使用智能提取的结果
             const finalName = name || extractedName;
-            const finalPrice = parseFloat(priceText.replace(/[^\d.]/g, '')) || extractedPrice || 0;
+            // 价格只取第一个货币数字，避免把“已售294”等后续数字拼进价格。
+            const selectorPriceMatch = priceText.match(/¥\s*(\d+(?:\.\d+)?)/);
+            const finalPrice = parseFloat(selectorPriceMatch ? selectorPriceMatch[1] : '') || extractedPrice || 0;
             const finalSales = salesText || extractedSales;
             const finalShopName = shopName || extractedShopName;
             const finalShopSales = shopSalesText || extractedShopSales;
+            // 读取商品页中可见的库存/购买状态文本，排除“已售”销量文案。
+            const pageLowerText = pageText.toLowerCase();
+            // 定义页面上下文可用的缺货关键词。
+            const outOfStockWords = ['已售罄', '售罄', '暂时无货', '暂无库存', '库存不足', '缺货', '补货通知', '到货通知', '无法购买', '不可购买'];
+            // 定义页面上下文可用的购买按钮关键词。
+            const inStockWords = ['立即购买', '马上抢', '立即抢购', '加入购物车', '去购买', '购买'];
+            const visibleActionTexts = Array.from(document.querySelectorAll('button, a, [role="button"], input[type="button"], input[type="submit"]'))
+                .map(element => (element.innerText || element.value || '').trim().toLowerCase())
+                .filter(Boolean);
+            // 先判断明确缺货文案，避免相关商品区域的购买按钮造成误报。
+            const outOfStockReason = outOfStockWords.find(word => pageLowerText.includes(word.toLowerCase()));
+            const inStockReason = visibleActionTexts.find(text => inStockWords.some(word => text === word || text.includes(word)));
+            // 未找到明确依据时保持 UNKNOWN，只有明确可购买时才进入有货状态。
+            const stockStatus = outOfStockReason ? 'OUT_OF_STOCK' : (inStockReason ? 'IN_STOCK' : 'UNKNOWN');
 
             console.log('最终提取结果:', {
                 name: finalName,
                 price: finalPrice,
                 sales: finalSales,
                 shopName: finalShopName,
-                shopSales: finalShopSales
+                shopSales: finalShopSales,
+                stockStatus,
+                stockReason: outOfStockReason || inStockReason || '未找到明确库存依据'
             });
 
             return {
@@ -565,6 +691,8 @@ async function scrapeProductData(url) {
                 salesText: finalSales,
                 shopName: finalShopName,
                 shopSalesText: finalShopSales,
+                stockStatus,
+                stockReason: outOfStockReason || inStockReason || '未找到明确库存依据',
                 // 调试信息
                 debug: {
                     originalPriceText: priceText,
@@ -588,7 +716,9 @@ async function scrapeProductData(url) {
             price: data.debug.extractedInfo.price || data.price,
             productSales: parseSalesNumber(data.debug.extractedInfo.sales || data.salesText),
             shopName: data.debug.extractedInfo.shopName || data.shopName,
-            shopSales: parseSalesNumber(data.debug.extractedInfo.shopSales || data.shopSalesText)
+            shopSales: parseSalesNumber(data.debug.extractedInfo.shopSales || data.shopSalesText),
+            stockStatus: data.stockStatus || 'UNKNOWN',
+            stockReason: data.stockReason || '未找到明确库存依据'
         };
 
         console.log('处理后的数据:', result);
@@ -598,7 +728,8 @@ async function scrapeProductData(url) {
         console.error('爬取数据失败:', error);
         throw error;
     } finally {
-        await browser.close();
+        // 只关闭当前页面，浏览器实例继续供其他任务复用。
+        if (page) await page.close();
     }
 }
 
@@ -723,7 +854,7 @@ app.post('/api/products/:id/refresh', async (req, res) => {
         const productData = await scrapeProductData(product.url);
 
         // 更新商品基本信息
-        Object.assign(product, productData);
+        await applyProductData(product, productData);
 
         // 添加新的销量数据
         const today = new Date().toISOString().split('T')[0];
@@ -853,81 +984,105 @@ app.delete('/api/products/:id', (req, res) => {
     res.json({ message: '商品删除成功' });
 });
 
+// 提供邮件配置测试接口，便于部署后验证 SMTP 参数。
+app.post('/api/mail/test', async (req, res) => {
+    // 使用用户指定或默认测试内容发送一封测试邮件。
+    const testProduct = { name: '邮件配置测试', price: 0, stockStatus: 'IN_STOCK', stockReason: '手动测试', url: 'http://localhost:3001' };
+    try {
+        const sent = await sendRestockEmail(testProduct, testProduct);
+        if (!sent) return res.status(503).json({ error: '未配置完整邮件参数' });
+        return res.json({ message: '测试邮件已发送' });
+    } catch (error) {
+        console.error('测试邮件发送失败:', error);
+        return res.status(500).json({ error: `测试邮件发送失败: ${error.message}` });
+    }
+});
+
 // 自动刷新所有商品数据的函数
 async function autoRefreshAllProducts() {
-    if (products.length === 0) {
-        console.log('没有商品需要刷新');
+    // 如果上一轮仍在运行，则跳过本轮，避免重复请求小红书。
+    if (refreshInProgress) {
+        console.warn('上一轮自动刷新尚未完成，跳过本轮任务。');
         return;
     }
-
-    console.log(`================================`);
-    console.log(`开始自动刷新所有商品数据 (${new Date().toLocaleString()})`);
-    console.log(`需要刷新的商品数量: ${products.length}`);
-    console.log(`================================`);
-
-    let successCount = 0;
-    let failCount = 0;
-
-    for (const product of products) {
-        try {
-            console.log(`正在刷新商品: ${product.name} (ID: ${product.id})`);
-
-            // 爬取最新数据
-            const productData = await scrapeProductData(product.url);
-
-            // 更新商品基本信息
-            Object.assign(product, productData);
-
-            // 添加新的销量数据
-            const now = new Date();
-            const today = now.toISOString().split('T')[0];
-            const currentHour = now.getHours();
-
-            // 检查今天是否已有数据
-            const existingTodayData = salesData.find(s =>
-                s.product_id === product.id && s.crawl_date === today
-            );
-
-            // 如果今天还没有数据，或者距离上次更新超过1小时，则添加新数据
-            if (!existingTodayData ||
-                (new Date() - new Date(existingTodayData.crawl_time)) > 60 * 60 * 1000) {
-
-                salesData.push({
-                    product_id: product.id,
-                    product_sales: productData.productSales,
-                    shop_sales: productData.shopSales,
-                    crawl_date: today,
-                    crawl_time: now.toISOString()
-                });
-
-                console.log(`✅ 商品 ${product.name} 数据更新成功 - 销量: ${productData.productSales}`);
-                successCount++;
-            } else {
-                console.log(`⏭️ 商品 ${product.name} 今天已更新过，跳过`);
-            }
-
-            // 避免请求过于频繁，每个商品之间间隔2秒
-            await new Promise(resolve => setTimeout(resolve, 2000));
-
-        } catch (error) {
-            console.error(`❌ 商品 ${product.name} 刷新失败:`, error.message);
-            failCount++;
+    refreshInProgress = true;
+    try {
+        if (products.length === 0) {
+            console.log('没有商品需要刷新');
+            return;
         }
+
+        console.log(`================================`);
+        console.log(`开始自动刷新所有商品数据 (${new Date().toLocaleString()})`);
+        console.log(`需要刷新的商品数量: ${products.length}`);
+        console.log(`================================`);
+
+        let successCount = 0;
+        let failCount = 0;
+
+        for (const product of products) {
+            try {
+                console.log(`正在刷新商品: ${product.name} (ID: ${product.id})`);
+
+                // 爬取最新数据
+                const productData = await scrapeProductData(product.url);
+
+                // 更新商品基本信息
+                await applyProductData(product, productData);
+
+                // 添加新的销量数据
+                const now = new Date();
+                const today = now.toISOString().split('T')[0];
+
+                // 检查今天是否已有数据
+                const existingTodayData = salesData.find(s =>
+                    s.product_id === product.id && s.crawl_date === today
+                );
+
+                // 如果今天还没有数据，或者距离上次更新超过1小时，则添加新数据
+                if (!existingTodayData ||
+                    (new Date() - new Date(existingTodayData.crawl_time)) > 60 * 60 * 1000) {
+
+                    salesData.push({
+                        product_id: product.id,
+                        product_sales: productData.productSales,
+                        shop_sales: productData.shopSales,
+                        crawl_date: today,
+                        crawl_time: now.toISOString()
+                    });
+
+                    console.log(`✅ 商品 ${product.name} 数据更新成功 - 销量: ${productData.productSales}`);
+                    successCount++;
+                } else {
+                    console.log(`⏭️ 商品 ${product.name} 今天已更新过，跳过`);
+                }
+
+                // 避免请求过于频繁，每个商品之间间隔2秒
+                await new Promise(resolve => setTimeout(resolve, 2000));
+
+            } catch (error) {
+                console.error(`❌ 商品 ${product.name} 刷新失败:`, error.message);
+                failCount++;
+            }
+        }
+
+        // 保存数据。
+        saveData();
+
+        console.log(`================================`);
+        console.log(`自动刷新完成 (${new Date().toLocaleString()})`);
+        console.log(`成功: ${successCount} 个, 失败: ${failCount} 个`);
+        console.log(`下次自动刷新时间: ${new Date(Date.now() + CHECK_INTERVAL_MINUTES * 60 * 1000).toLocaleString()}`);
+        console.log(`================================`);
+    } finally {
+        // 无论刷新正常结束还是意外异常，都释放任务锁。
+        refreshInProgress = false;
     }
-
-    // 保存数据
-    saveData();
-
-    console.log(`================================`);
-    console.log(`自动刷新完成 (${new Date().toLocaleString()})`);
-    console.log(`成功: ${successCount} 个, 失败: ${failCount} 个`);
-    console.log(`下次自动刷新时间: ${new Date(Date.now() + 60 * 60 * 1000).toLocaleString()}`);
-    console.log(`================================`);
 }
 
-// 设置定时任务：每小时自动刷新所有商品数据
-cron.schedule('0 * * * *', async () => {
-    console.log('⏰ 定时任务触发：开始自动刷新商品数据...');
+// 设置可配置的定时任务，默认每 5 分钟刷新所有商品数据。
+cron.schedule(`*/${CHECK_INTERVAL_MINUTES} * * * *`, async () => {
+    console.log(`⏰ 定时任务触发：开始自动刷新商品数据（每 ${CHECK_INTERVAL_MINUTES} 分钟）...`);
     await autoRefreshAllProducts();
 }, {
     timezone: "Asia/Shanghai"
@@ -939,11 +1094,23 @@ app.get('/health', (req, res) => {
         status: 'healthy',
         timestamp: new Date().toISOString(),
         products: products.length,
-        uptime: process.uptime()
+        uptime: process.uptime(),
+        check_interval_minutes: CHECK_INTERVAL_MINUTES,
+        mail_configured: Boolean(process.env.MAIL_USERNAME && process.env.MAIL_PASSWORD && process.env.MAIL_RECIPIENT)
     });
 });
 
 // 启动服务器
+// 进程退出时释放共享浏览器资源。
+process.once('SIGINT', async () => {
+    await closeBrowser();
+    process.exit(0);
+});
+// 捕获容器停止信号，确保登录目录锁被释放。
+process.once('SIGTERM', async () => {
+    await closeBrowser();
+    process.exit(0);
+});
 const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`================================`);
     console.log(`小红书监控系统已启动`);
@@ -955,13 +1122,12 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     console.log('数据目录:', DATA_DIR);
     console.log(`================================`);
     console.log('⏰ 自动刷新功能已启用');
-    console.log('📅 刷新频率: 每小时一次');
-    console.log('🕐 下次刷新时间: 每小时的0分');
+    console.log(`📅 刷新频率: 每 ${CHECK_INTERVAL_MINUTES} 分钟一次`);
     console.log(`================================`);
 
-    // 启动后5分钟执行一次初始刷新（可选）
+    // 启动后 10 秒执行一次初始刷新，确保服务启动后尽快建立库存基线。
     setTimeout(async () => {
         console.log('🚀 执行启动后的初始数据刷新...');
         await autoRefreshAllProducts();
-    }, 5 * 60 * 1000); // 5分钟后执行
+    }, 10 * 1000);
 });
