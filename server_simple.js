@@ -24,8 +24,10 @@ const PORT_IS_EXPLICIT = Boolean(process.env.PORT);
 const FALLBACK_PORT = 3200;
 // 保存当前实际监听端口，默认值用于服务启动前的接口处理。
 let activePort = PORT;
-// 读取轮询间隔配置，默认每 5 分钟检查一次。
-const CHECK_INTERVAL_MINUTES = Math.max(1, parseInt(process.env.CHECK_INTERVAL_MINUTES || '5', 10));
+// 读取轮询间隔默认值，配置页保存后会更新运行时值。
+const DEFAULT_CHECK_INTERVAL_MINUTES = Math.max(1, parseInt(process.env.CHECK_INTERVAL_MINUTES || '5', 10));
+// 保存当前运行中的轮询间隔。
+let checkIntervalMinutes = DEFAULT_CHECK_INTERVAL_MINUTES;
 // 读取是否使用无头浏览器的配置。
 const HEADLESS = String(process.env.HEADLESS || 'true').toLowerCase() !== 'false';
 // 保存浏览器登录态的目录，避免每次抓取都重新登录。
@@ -65,8 +67,34 @@ if (!fs.existsSync(USER_DATA_DIR)) {
 let products = [];
 let salesData = [];
 let nextId = 1;
+// 保存配置页覆盖的收件人列表，未设置时回退到环境变量。
+let mailRecipientsOverride = null;
 // 防止定时任务与手动刷新同时执行造成浏览器和数据文件竞争。
 let refreshInProgress = false;
+// 保存当前定时任务实例，配置变更时先停止旧任务。
+let refreshTask = null;
+
+// 将刷新间隔转换为受支持的分钟数。
+function normalizeCheckIntervalMinutes(value, fallback = DEFAULT_CHECK_INTERVAL_MINUTES) {
+    // 仅接受 1 到 59 分钟，确保 node-cron 的分钟步长有效。
+    const parsed = Number.parseInt(value, 10);
+    return Number.isInteger(parsed) && parsed >= 1 && parsed <= 59 ? parsed : fallback;
+}
+
+// 将收件人输入转换为去重后的邮箱列表。
+function normalizeMailRecipients(value) {
+    // 同时支持数组、逗号、分号和换行分隔的输入。
+    const text = Array.isArray(value) ? value.join(',') : String(value || '');
+    const recipients = text.split(/[;,\n]/).map(item => item.trim()).filter(Boolean);
+    return [...new Set(recipients)];
+}
+
+// 校验邮箱地址格式并返回无效项。
+function findInvalidMailRecipients(recipients) {
+    // 使用轻量格式校验，避免把明显错误的地址写入配置。
+    const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return recipients.filter(recipient => !emailPattern.test(recipient));
+}
 
 // 将环境变量文本转换为布尔值。
 function envBoolean(name, defaultValue) {
@@ -138,10 +166,12 @@ function getMailTransporter() {
 
 // 读取邮件收件人配置；优先使用多收件人变量并兼容旧的单收件人变量。
 function getMailRecipients() {
+    // 配置页设置过收件人时，允许显式保存空列表以关闭通知。
+    if (Array.isArray(mailRecipientsOverride)) return mailRecipientsOverride;
     // 获取多收件人配置文本，未设置时回退到旧配置。
     const recipientsText = process.env.MAIL_RECIPIENTS || process.env.MAIL_RECIPIENT || '';
     // 支持英文逗号和分号分隔，并过滤空白项。
-    return recipientsText.split(/[;,]/).map(recipient => recipient.trim()).filter(Boolean);
+    return normalizeMailRecipients(recipientsText);
 }
 
 // 发送商品恢复库存通知邮件。
@@ -215,6 +245,14 @@ function loadData() {
             const configJson = fs.readFileSync(CONFIG_FILE, 'utf8');
             const config = JSON.parse(configJson);
             nextId = config.nextId || 1;
+            // 读取配置页保存的收件人，兼容旧配置文件没有该字段的情况。
+            if (Object.prototype.hasOwnProperty.call(config, 'mail_recipients')) {
+                mailRecipientsOverride = normalizeMailRecipients(config.mail_recipients);
+            }
+            // 读取配置页保存的刷新间隔，非法值回退到环境变量默认值。
+            if (Object.prototype.hasOwnProperty.call(config, 'check_interval_minutes')) {
+                checkIntervalMinutes = normalizeCheckIntervalMinutes(config.check_interval_minutes);
+            }
             console.log(`下一个ID: ${nextId}`);
         }
 
@@ -239,8 +277,12 @@ function saveData() {
         // 保存销量数据
         fs.writeFileSync(SALES_DATA_FILE, JSON.stringify(salesData, null, 2));
 
-        // 保存配置数据
-        const config = { nextId };
+        // 保存配置数据，覆盖环境变量默认值以便重启后继续生效。
+        const config = {
+            nextId,
+            mail_recipients: getMailRecipients(),
+            check_interval_minutes: checkIntervalMinutes
+        };
         fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
 
         console.log('数据保存成功');
@@ -999,6 +1041,49 @@ app.delete('/api/products/:id', (req, res) => {
     res.json({ message: '商品删除成功' });
 });
 
+// 获取当前运行中的邮件收件人和刷新间隔配置。
+app.get('/api/settings', (req, res) => {
+    // 不返回邮件密码等敏感信息，仅提供设置页需要展示的配置。
+    res.json({
+        mailRecipients: getMailRecipients(),
+        checkIntervalMinutes: checkIntervalMinutes
+    });
+});
+
+// 保存设置页提交的收件人和刷新间隔，并立即应用到当前进程。
+app.post('/api/settings', (req, res) => {
+    // 读取前端提交的配置字段。
+    const { mailRecipients, checkIntervalMinutes: requestedInterval } = req.body || {};
+    // 统一解析收件人输入，支持字符串和数组格式。
+    const recipients = mailRecipients === undefined ? getMailRecipients() : normalizeMailRecipients(mailRecipients);
+    // 校验邮箱格式，避免错误地址进入邮件发送流程。
+    const invalidRecipients = findInvalidMailRecipients(recipients);
+    if (invalidRecipients.length > 0) {
+        return res.status(400).json({ error: `邮箱格式不正确：${invalidRecipients.join('、')}` });
+    }
+    // 校验刷新间隔，限制在 node-cron 支持的分钟步长范围内。
+    const nextInterval = requestedInterval === undefined
+        ? checkIntervalMinutes
+        : normalizeCheckIntervalMinutes(requestedInterval, null);
+    if (nextInterval === null) {
+        return res.status(400).json({ error: '刷新间隔必须是 1 到 59 之间的整数分钟' });
+    }
+
+    // 更新运行时配置，空数组表示主动关闭补货邮件通知。
+    mailRecipientsOverride = recipients;
+    checkIntervalMinutes = nextInterval;
+    // 持久化配置，服务重启后仍使用设置页保存的值。
+    saveData();
+    // 重新创建定时任务，让新的刷新间隔立即生效。
+    scheduleAutoRefresh();
+
+    res.json({
+        message: '设置已保存',
+        mailRecipients: getMailRecipients(),
+        checkIntervalMinutes: checkIntervalMinutes
+    });
+});
+
 // 提供邮件配置测试接口，便于部署后验证 SMTP 参数。
 app.post('/api/mail/test', async (req, res) => {
     // 使用用户指定或默认测试内容发送一封测试邮件。
@@ -1087,7 +1172,7 @@ async function autoRefreshAllProducts() {
         console.log(`================================`);
         console.log(`自动刷新完成 (${new Date().toLocaleString()})`);
         console.log(`成功: ${successCount} 个, 失败: ${failCount} 个`);
-        console.log(`下次自动刷新时间: ${new Date(Date.now() + CHECK_INTERVAL_MINUTES * 60 * 1000).toLocaleString()}`);
+        console.log(`下次自动刷新时间: ${new Date(Date.now() + checkIntervalMinutes * 60 * 1000).toLocaleString()}`);
         console.log(`================================`);
     } finally {
         // 无论刷新正常结束还是意外异常，都释放任务锁。
@@ -1095,13 +1180,20 @@ async function autoRefreshAllProducts() {
     }
 }
 
-// 设置可配置的定时任务，默认每 5 分钟刷新所有商品数据。
-cron.schedule(`*/${CHECK_INTERVAL_MINUTES} * * * *`, async () => {
-    console.log(`⏰ 定时任务触发：开始自动刷新商品数据（每 ${CHECK_INTERVAL_MINUTES} 分钟）...`);
-    await autoRefreshAllProducts();
-}, {
-    timezone: "Asia/Shanghai"
-});
+// 根据当前配置创建自动刷新任务。
+function scheduleAutoRefresh() {
+    // 配置发生变化时停止旧任务，避免多个定时器重复刷新。
+    if (refreshTask) refreshTask.stop();
+    refreshTask = cron.schedule(`*/${checkIntervalMinutes} * * * *`, async () => {
+        console.log(`⏰ 定时任务触发：开始自动刷新商品数据（每 ${checkIntervalMinutes} 分钟）...`);
+        await autoRefreshAllProducts();
+    }, {
+        timezone: "Asia/Shanghai"
+    });
+}
+
+// 启动默认自动刷新任务。
+scheduleAutoRefresh();
 
 // 健康检查端点
 app.get('/health', (req, res) => {
@@ -1110,7 +1202,7 @@ app.get('/health', (req, res) => {
         timestamp: new Date().toISOString(),
         products: products.length,
         uptime: process.uptime(),
-        check_interval_minutes: CHECK_INTERVAL_MINUTES,
+        check_interval_minutes: checkIntervalMinutes,
         mail_configured: Boolean(process.env.MAIL_USERNAME && process.env.MAIL_PASSWORD && getMailRecipients().length > 0)
     });
 });
@@ -1131,7 +1223,7 @@ function startServer(port) {
         console.log('数据目录:', DATA_DIR);
         console.log(`================================`);
         console.log('⏰ 自动刷新功能已启用');
-        console.log(`📅 刷新频率: 每 ${CHECK_INTERVAL_MINUTES} 分钟一次`);
+        console.log(`📅 刷新频率: 每 ${checkIntervalMinutes} 分钟一次`);
         console.log(`================================`);
 
         // 启动后 10 秒执行一次初始刷新，确保服务启动后尽快建立库存基线。

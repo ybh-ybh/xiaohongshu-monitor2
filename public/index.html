@@ -28,11 +28,11 @@
                 <div class="sidebar-label">常规</div>
                 <nav class="sidebar-nav" aria-label="侧边导航">
                     <a class="nav-item active" href="#monitor" aria-current="page"><span class="nav-icon" aria-hidden="true">⌁</span>概览</a>
-                    <a class="nav-item" href="#mail"><span class="nav-icon" aria-hidden="true">✉</span>邮件通知</a>
                 </nav>
                 <div class="sidebar-label sidebar-label-spaced">系统</div>
                 <nav class="sidebar-nav" aria-label="系统导航">
                     <a class="nav-item" href="#logs"><span class="nav-icon" aria-hidden="true">▤</span>操作日志</a>
+                    <a class="nav-item" href="#settings"><span class="nav-icon" aria-hidden="true">⚙</span>设置</a>
                 </nav>
                 <div class="sidebar-footer">
                     <span class="status-pulse" aria-hidden="true"></span>
@@ -41,13 +41,13 @@
             </aside>
 
             <main class="main-content" id="monitor">
+                <div id="monitorView">
                 <section class="page-heading">
                     <div>
                         <h1>库存监控</h1>
                     </div>
                     <div class="heading-actions">
                         <button onclick="refreshAllData()" class="btn btn-quiet" type="button"><span aria-hidden="true">↻</span>刷新数据</button>
-                        <button onclick="testEmail()" class="btn btn-primary" type="button"><span aria-hidden="true">✉</span>测试邮件</button>
                     </div>
                 </section>
 
@@ -75,17 +75,7 @@
                 </section>
 
                 <section class="workspace-card" id="products">
-                    <div class="workspace-head">
-                        <div>
-                            <div class="workspace-title-line">
-                                <h2>商品清单</h2>
-                                <span class="record-count" id="recordCount">— 条记录</span>
-                            </div>
-                            <p>管理监控链接，及时掌握商品库存状态。</p>
-                        </div>
-                    </div>
-
-                    <div class="add-product-section" id="mail">
+                    <div class="add-product-section">
                         <div class="input-tabs" role="tablist" aria-label="添加商品方式">
                             <button class="tab-btn active" type="button" role="tab" aria-selected="true" onclick="switchTab('single')">单个添加</button>
                             <button class="tab-btn" type="button" role="tab" aria-selected="false" onclick="switchTab('batch')">批量添加</button>
@@ -152,11 +142,57 @@
                         </table>
                     </div>
                 </section>
-
-                <div class="page-footer" id="logs">
-                    <span>小红书商品库存监控</span>
-                    <span>库存状态仅供参考，请以商品页为准</span>
                 </div>
+
+                <section id="settingsView" class="settings-view" aria-labelledby="settingsTitle" hidden>
+                    <div class="page-heading settings-heading">
+                        <div>
+                            <p class="eyebrow">SYSTEM SETTINGS</p>
+                            <h1 id="settingsTitle">设置</h1>
+                            <p class="page-description">配置库存补货通知和自动刷新频率。</p>
+                        </div>
+                    </div>
+
+                    <div class="workspace-card settings-card">
+                        <div class="workspace-head">
+                            <div>
+                                <div class="workspace-title-line">
+                                    <h2>通知与刷新</h2>
+                                </div>
+                                <p>修改后立即生效，服务重启后仍会保留。</p>
+                            </div>
+                        </div>
+
+                        <form id="settingsForm" class="settings-form" onsubmit="saveSettings(event)">
+                            <div class="settings-field">
+                                <label class="field-label" for="settingsRecipients">收件人邮箱</label>
+                                <textarea id="settingsRecipients" class="batch-textarea settings-textarea" rows="3" placeholder="多个邮箱用逗号或分号分隔"></textarea>
+                                <p class="settings-hint">库存从无货恢复为有货时，将向这些邮箱发送通知。</p>
+                            </div>
+
+                            <div class="settings-field">
+                                <label class="field-label" for="settingsInterval">刷新间隔</label>
+                                <div class="settings-number-control">
+                                    <input id="settingsInterval" class="url-input" type="number" min="1" max="59" step="1" required>
+                                    <span>分钟</span>
+                                </div>
+                                <p class="settings-hint">自动刷新商品库存的间隔，支持 1 到 59 分钟。</p>
+                            </div>
+
+                            <div class="settings-field settings-test-field">
+                                <div>
+                                    <div class="field-label">测试邮件</div>
+                                    <p class="settings-hint">向当前收件人发送一封测试邮件，确认通知配置可用。</p>
+                                </div>
+                                <button onclick="testEmail()" class="btn btn-outline" type="button"><span aria-hidden="true">✉</span>发送测试邮件</button>
+                            </div>
+
+                            <div class="settings-actions">
+                                <button class="btn btn-primary" type="submit">保存设置</button>
+                            </div>
+                        </form>
+                    </div>
+                </section>
             </main>
         </div>
     </div>

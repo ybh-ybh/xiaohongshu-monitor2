@@ -858,6 +858,70 @@ kbd {
     font-size: 11px;
 }
 
+.settings-view[hidden] {
+    display: none;
+}
+
+.settings-heading {
+    align-items: flex-start;
+}
+
+.settings-card {
+    max-width: 900px;
+    margin: 0 auto;
+}
+
+.settings-form {
+    display: grid;
+    gap: 26px;
+    padding: 28px;
+}
+
+.settings-field {
+    display: grid;
+    gap: 8px;
+    max-width: 680px;
+}
+
+.settings-textarea {
+    min-height: 88px;
+    resize: vertical;
+}
+
+.settings-hint {
+    color: var(--soft-muted);
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.settings-number-control {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.settings-number-control .url-input {
+    width: 130px;
+}
+
+.settings-test-field {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    max-width: none;
+    padding-top: 24px;
+    border-top: 1px solid var(--line);
+}
+
+.settings-actions {
+    display: flex;
+    justify-content: flex-end;
+    padding-top: 2px;
+}
+
 .loading {
     position: fixed;
     inset: 0;
@@ -961,6 +1025,8 @@ kbd {
     .url-input { grid-column: 1 / -1; }
     .input-group .btn-outline { grid-column: auto; }
     .page-footer { gap: 10px; flex-direction: column; margin-top: 13px; }
+    .settings-form { padding: 20px 18px; }
+    .settings-test-field { align-items: flex-start; flex-direction: column; }
 }
 
 @media (max-width: 420px) {

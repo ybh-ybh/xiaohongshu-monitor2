@@ -6,3 +6,4 @@ data/browser-profile*
 logs
 debug_screenshot.png
 .idea
+agent_memory/

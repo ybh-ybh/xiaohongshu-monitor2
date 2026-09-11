@@ -3,7 +3,12 @@ let productsData = [];
 // 页面加载时获取数据
 document.addEventListener('DOMContentLoaded', function() {
     loadProducts();
+    loadSettings();
+    updateViewFromHash();
 });
+
+// 根据地址栏锚点切换库存监控和设置页面。
+window.addEventListener('hashchange', updateViewFromHash);
 
 // 显示加载状态
 function showLoading() {
@@ -473,4 +478,95 @@ function switchTab(tabName) {
 function clearBatchInput() {
     document.getElementById('batchUrls').value = '';
     document.getElementById('batchProgress').style.display = 'none';
+}
+
+// 加载设置页需要展示的当前配置。
+async function loadSettings() {
+    try {
+        // 从后端读取持久化的收件人和刷新间隔。
+        const response = await fetch('/api/settings');
+        const settings = await response.json();
+        if (!response.ok) {
+            showMessage(settings.error || '加载设置失败', 'error');
+            return;
+        }
+
+        // 将收件人列表转换为便于编辑的文本格式。
+        const recipientsEl = document.getElementById('settingsRecipients');
+        // 获取刷新间隔输入框。
+        const intervalEl = document.getElementById('settingsInterval');
+        if (recipientsEl) recipientsEl.value = (settings.mailRecipients || []).join(', ');
+        if (intervalEl) intervalEl.value = settings.checkIntervalMinutes || 5;
+    } catch (error) {
+        // 设置页加载失败时保留表单默认值，不影响库存列表使用。
+        console.error('加载设置失败:', error);
+    }
+}
+
+// 保存设置页提交的收件人和刷新间隔。
+async function saveSettings(event) {
+    // 阻止表单默认提交导致页面刷新。
+    event.preventDefault();
+    // 获取收件人输入框。
+    const recipientsEl = document.getElementById('settingsRecipients');
+    // 获取刷新间隔输入框。
+    const intervalEl = document.getElementById('settingsInterval');
+    // 读取并校验刷新间隔数值。
+    const checkIntervalMinutes = Number(intervalEl.value);
+    if (!Number.isInteger(checkIntervalMinutes) || checkIntervalMinutes < 1 || checkIntervalMinutes > 59) {
+        showMessage('刷新间隔必须是 1 到 59 之间的整数分钟', 'error');
+        intervalEl.focus();
+        return;
+    }
+
+    showLoading();
+    try {
+        // 将表单配置提交给后端并立即应用。
+        const response = await fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                mailRecipients: recipientsEl.value,
+                checkIntervalMinutes
+            })
+        });
+        // 读取后端返回的保存结果。
+        const result = await response.json();
+        if (!response.ok) {
+            showMessage(result.error || '保存设置失败', 'error');
+            return;
+        }
+
+        // 用后端规范化后的值回填表单，保持界面与实际配置一致。
+        recipientsEl.value = (result.mailRecipients || []).join(', ');
+        intervalEl.value = result.checkIntervalMinutes;
+        showMessage('设置已保存', 'success');
+    } catch (error) {
+        // 处理服务不可用或网络异常。
+        console.error('保存设置失败:', error);
+        showMessage('网络错误，请稍后重试', 'error');
+    } finally {
+        // 无论请求结果如何都关闭加载状态。
+        hideLoading();
+    }
+}
+
+// 根据当前地址栏决定展示哪个主内容视图。
+function updateViewFromHash() {
+    // 判断当前是否进入设置页面。
+    const isSettings = window.location.hash === '#settings';
+    // 获取库存监控视图节点。
+    const monitorView = document.getElementById('monitorView');
+    // 获取设置视图节点。
+    const settingsView = document.getElementById('settingsView');
+    if (monitorView) monitorView.hidden = isSettings;
+    if (settingsView) settingsView.hidden = !isSettings;
+
+    // 同步侧边栏高亮状态和无障碍当前页标记。
+    document.querySelectorAll('.sidebar-nav .nav-item').forEach(item => {
+        const active = isSettings ? item.getAttribute('href') === '#settings' : item.getAttribute('href') === '#monitor';
+        item.classList.toggle('active', active);
+        if (active) item.setAttribute('aria-current', 'page');
+        else item.removeAttribute('aria-current');
+    });
 }
