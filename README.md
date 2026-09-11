@@ -47,8 +47,9 @@ docker build -t xiaohongshu-monitor .
 # 运行容器
 docker run -d \
   --name xiaohongshu-monitor \
+  --env-file ./.env \
   -p 3001:3001 \
-  -v $(pwd)/data:/app/data \
+  -v /www/wwwdata/xiaohongshu-monitor2:/app/data \
   xiaohongshu-monitor
 ```
 
