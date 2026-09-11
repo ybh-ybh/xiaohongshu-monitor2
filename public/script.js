@@ -63,6 +63,17 @@ function formatTime(timeString) {
     return date.toLocaleString('zh-CN');
 }
 
+// 转义商品名称中的 HTML 特殊字符，避免用户编辑内容被当作标签解析。
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, character => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+    }[character]));
+}
+
 // 提取小红书链接
 function extractXhsUrl(text) {
     // 支持的链接格式：
@@ -283,8 +294,8 @@ function renderTable() {
     tbody.innerHTML = productsData.map(product => `
         <tr>
             <td>
-                <div class="product-name" title="${product.name || '未知商品'}">
-                    ${product.name || '未知商品'}
+                <div class="product-name" title="${escapeHtml(product.name || '未知商品')}">
+                    ${escapeHtml(product.name || '未知商品')}
                 </div>
             </td>
             <td class="price">${formatPrice(product.price)}</td>
@@ -292,13 +303,14 @@ function renderTable() {
                 ${formatStockStatus(product.stockStatus, product.stockReason)}
             </td>
             <td>
-                <div class="shop-name" title="${product.shop_name || product.shopName || '未知店铺'}">
-                    ${product.shop_name || product.shopName || '未知店铺'}
+                <div class="shop-name" title="${escapeHtml(product.shop_name || product.shopName || '未知店铺')}">
+                    ${escapeHtml(product.shop_name || product.shopName || '未知店铺')}
                 </div>
             </td>
             <td class="update-time">${formatTime(product.last_update)}</td>
             <td>
-                <a href="${product.url}" target="_blank" rel="noopener noreferrer" class="btn btn-info btn-small" aria-label="查看${product.name || '商品'}">查看商品</a>
+                <a href="${product.url}" target="_blank" rel="noopener noreferrer" class="btn btn-info btn-small" aria-label="查看${escapeHtml(product.name || '商品')}">查看商品</a>
+                <button onclick="openEditProductModal(${product.id})" class="btn btn-edit btn-small" type="button">编辑</button>
                 <button onclick="refreshProduct(${product.id})" class="btn btn-success btn-small">刷新</button>
                 <button onclick="deleteProduct(${product.id})" class="btn btn-danger btn-small">删除</button>
             </td>
@@ -397,6 +409,84 @@ async function refreshAllData() {
     }
 }
 
+// 打开编辑商品名称的弹窗并回填当前名称。
+function openEditProductModal(productId) {
+    // 查找当前需要编辑的商品。
+    const product = productsData.find(item => item.id === productId);
+    if (!product) {
+        showMessage('商品不存在，请刷新列表后重试', 'error');
+        return;
+    }
+
+    // 获取编辑弹窗节点。
+    const modal = document.getElementById('editProductModal');
+    // 获取商品编号隐藏字段。
+    const idInput = document.getElementById('editProductId');
+    // 获取商品名称输入框。
+    const nameInput = document.getElementById('editProductName');
+    idInput.value = product.id;
+    nameInput.value = product.name || '';
+    modal.hidden = false;
+    document.body.classList.add('modal-open');
+    nameInput.focus();
+    nameInput.select();
+}
+
+// 关闭编辑商品名称的弹窗并恢复页面滚动。
+function closeEditProductModal() {
+    // 获取编辑弹窗节点。
+    const modal = document.getElementById('editProductModal');
+    if (!modal || modal.hidden) return;
+    modal.hidden = true;
+    document.body.classList.remove('modal-open');
+}
+
+// 提交编辑后的商品名称并刷新商品列表。
+async function saveProductName(event) {
+    // 阻止表单默认提交导致页面刷新。
+    event.preventDefault();
+    // 获取商品编号隐藏字段。
+    const idInput = document.getElementById('editProductId');
+    // 获取商品名称输入框。
+    const nameInput = document.getElementById('editProductName');
+    // 清理用户输入的商品名称。
+    const name = nameInput.value.trim();
+    if (!name) {
+        showMessage('请输入商品名称', 'error');
+        nameInput.focus();
+        return;
+    }
+
+    showLoading();
+    try {
+        // 调用后端接口保存商品名称。
+        const response = await fetch(`/api/products/${idInput.value}`, {
+            method: 'PATCH',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ name })
+        });
+        // 读取接口返回的结果。
+        const result = await response.json();
+        if (!response.ok) {
+            showMessage(result.error || '商品名称保存失败', 'error');
+            return;
+        }
+
+        closeEditProductModal();
+        showMessage('商品名称已更新', 'success');
+        loadProducts();
+    } catch (error) {
+        // 处理接口不可用或网络异常。
+        console.error('更新商品名称失败:', error);
+        showMessage('网络错误，请稍后重试', 'error');
+    } finally {
+        // 无论请求结果如何都关闭加载状态。
+        hideLoading();
+    }
+}
+
 // 测试当前邮件配置是否能够发送邮件。
 async function testEmail() {
     // 显示邮件测试请求的加载状态。
@@ -454,6 +544,20 @@ async function deleteProduct(productId) {
 document.getElementById('productUrl').addEventListener('keypress', function(e) {
     if (e.key === 'Enter') {
         addProduct();
+    }
+});
+
+// 支持按 Escape 键关闭编辑弹窗。
+document.addEventListener('keydown', function(event) {
+    if (event.key === 'Escape') {
+        closeEditProductModal();
+    }
+});
+
+// 点击弹窗遮罩区域时关闭编辑弹窗。
+document.getElementById('editProductModal').addEventListener('click', function(event) {
+    if (event.target === event.currentTarget) {
+        closeEditProductModal();
     }
 });
 

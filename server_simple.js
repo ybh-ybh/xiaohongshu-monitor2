@@ -941,6 +941,35 @@ app.post('/api/products/:id/refresh', async (req, res) => {
     }
 });
 
+// 更新商品名称，仅允许修改名称字段，避免覆盖商品的采集数据。
+app.patch('/api/products/:id', (req, res) => {
+    // 解析路由中的商品编号。
+    const productId = parseInt(req.params.id, 10);
+    // 查找需要更新的商品记录。
+    const product = products.find(item => item.id === productId);
+    if (!product) {
+        return res.status(404).json({ error: '商品不存在' });
+    }
+
+    // 读取并清理前端提交的商品名称。
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+    if (!name) {
+        return res.status(400).json({ error: '商品名称不能为空' });
+    }
+    if (name.length > 200) {
+        return res.status(400).json({ error: '商品名称不能超过 200 个字符' });
+    }
+
+    // 持久化新的商品名称。
+    product.name = name;
+    saveData();
+
+    res.json({
+        message: '商品名称更新成功',
+        product
+    });
+});
+
 // 获取商品销量趋势数据
 app.get('/api/products/:id/trend', (req, res) => {
     const productId = parseInt(req.params.id);

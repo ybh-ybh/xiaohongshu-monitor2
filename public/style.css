@@ -336,6 +336,11 @@ kbd {
     padding: 38px clamp(20px, 4vw, 58px) 24px;
 }
 
+.monitor-anchor {
+    height: 0;
+    scroll-margin-top: 82px;
+}
+
 .page-heading {
     display: flex;
     align-items: flex-end;
@@ -438,6 +443,15 @@ kbd {
     background: #eaf5fb;
 }
 
+.btn-edit {
+    color: #6f5a23;
+    background: var(--amber-soft);
+}
+
+.btn-edit:hover {
+    background: #fff1cf;
+}
+
 .btn-danger {
     color: #c7433b;
     background: var(--coral-soft);
@@ -513,13 +527,32 @@ kbd {
 .workspace-card {
     position: relative;
     max-width: 1480px;
-    min-height: 520px;
-    margin: 0 auto;
+    min-height: 0;
+    margin: 0;
+    scroll-margin-top: 82px;
     overflow: hidden;
     background: var(--surface);
     border: 1px solid var(--line);
     border-radius: 14px;
     box-shadow: var(--shadow);
+}
+
+.workspace-stack {
+    display: grid;
+    gap: 18px;
+    max-width: 1480px;
+    margin: 0 auto;
+}
+
+.add-product-card .add-product-section {
+    margin: 0 27px;
+    padding-top: 22px;
+    padding-bottom: 25px;
+    border-bottom: 0;
+}
+
+.catalog-card {
+    min-height: 0;
 }
 
 .workspace-card::before {
@@ -746,6 +779,9 @@ kbd {
 }
 
 .controls {
+    display: flex;
+    align-items: center;
+    gap: 14px;
     padding: 0;
     background: transparent;
     border: 0;
@@ -970,6 +1006,89 @@ kbd {
 .message.error { background: #cf4d42; }
 .message.info { background: var(--blue); }
 
+body.modal-open {
+    overflow: hidden;
+}
+
+.modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 1100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: rgba(23, 35, 55, 0.46);
+}
+
+.modal-backdrop[hidden] {
+    display: none;
+}
+
+.modal-dialog {
+    width: min(100%, 480px);
+    overflow: hidden;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    box-shadow: 0 24px 60px rgba(23, 35, 55, 0.2);
+}
+
+.modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 20px 24px 16px;
+    border-bottom: 1px solid var(--line);
+}
+
+.modal-header h2 {
+    color: var(--ink);
+    font-size: 18px;
+    font-weight: 750;
+}
+
+.modal-close {
+    display: grid;
+    width: 32px;
+    height: 32px;
+    place-items: center;
+    color: var(--muted);
+    background: transparent;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 22px;
+    line-height: 1;
+}
+
+.modal-close:hover {
+    color: var(--ink);
+    background: #f1f3f5;
+}
+
+.modal-form {
+    display: grid;
+    gap: 24px;
+    padding: 22px 24px 24px;
+}
+
+.modal-field {
+    display: grid;
+    gap: 9px;
+}
+
+.modal-input {
+    height: 42px;
+}
+
+.modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 9px;
+    padding-top: 2px;
+}
+
 @media (max-width: 1060px) {
     .brand { min-width: 170px; }
     .search-box { width: 175px; }
@@ -1010,14 +1129,17 @@ kbd {
     .sidebar-nav { display: flex; gap: 5px; overflow-x: auto; }
     .nav-item { flex: 0 0 auto; min-height: 36px; padding: 0 12px; }
     .main-content { width: 100%; padding: 26px 14px 20px; }
+    .monitor-anchor { scroll-margin-top: 120px; }
     .page-heading { align-items: flex-start; flex-direction: column; gap: 17px; margin-bottom: 22px; }
     .heading-actions { width: 100%; justify-content: flex-start; }
     .metric-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-bottom: 15px; }
     .metric-card { min-height: 112px; padding: 15px; }
     .metric-card > strong { margin-top: 10px; font-size: 23px; }
     .workspace-head { flex-direction: column; padding: 20px 18px 17px; }
-    .add-product-section { margin: 0 18px; }
+    .workspace-card { scroll-margin-top: 120px; }
+    .add-product-card .add-product-section { margin: 0 18px; }
     .table-toolbar { align-items: flex-start; flex-direction: column; gap: 12px; padding: 16px 18px 13px; }
+    .controls { width: 100%; justify-content: space-between; gap: 10px; }
     .table-heading { align-items: flex-start; flex-direction: column; gap: 4px; }
     .table-container { margin: 0 10px 10px; }
     .input-group { display: grid; grid-template-columns: 1fr 1fr; }
@@ -1027,6 +1149,8 @@ kbd {
     .page-footer { gap: 10px; flex-direction: column; margin-top: 13px; }
     .settings-form { padding: 20px 18px; }
     .settings-test-field { align-items: flex-start; flex-direction: column; }
+    .modal-header { padding-right: 18px; padding-left: 18px; }
+    .modal-form { padding-right: 18px; padding-left: 18px; }
 }
 
 @media (max-width: 420px) {

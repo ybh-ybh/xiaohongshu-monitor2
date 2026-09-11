@@ -40,17 +40,9 @@
                 </div>
             </aside>
 
-            <main class="main-content" id="monitor">
+            <main class="main-content">
                 <div id="monitorView">
-                <section class="page-heading">
-                    <div>
-                        <h1>库存监控</h1>
-                    </div>
-                    <div class="heading-actions">
-                        <button onclick="refreshAllData()" class="btn btn-quiet" type="button"><span aria-hidden="true">↻</span>刷新数据</button>
-                    </div>
-                </section>
-
+                <div id="monitor" class="monitor-anchor" aria-hidden="true"></div>
                 <section class="metric-strip" aria-label="监控概览">
                     <article class="metric-card metric-card-accent">
                         <div class="metric-label"><span class="metric-mark coral" aria-hidden="true"></span>监控商品</div>
@@ -74,8 +66,10 @@
                     </article>
                 </section>
 
-                <section class="workspace-card" id="products">
-                    <div class="add-product-section">
+                <div class="workspace-stack">
+                    <section class="workspace-card add-product-card" id="add-product">
+
+                        <div class="add-product-section">
                         <div class="input-tabs" role="tablist" aria-label="添加商品方式">
                             <button class="tab-btn active" type="button" role="tab" aria-selected="true" onclick="switchTab('single')">单个添加</button>
                             <button class="tab-btn" type="button" role="tab" aria-selected="false" onclick="switchTab('batch')">批量添加</button>
@@ -104,44 +98,57 @@
                             </div>
                         </div>
                     </div>
+                    </section>
 
-                    <div class="table-toolbar">
-                        <div class="table-heading">
-                            <span class="table-kicker">LIVE CATALOG</span>
-                            <span class="table-hint">最近更新的商品排在前面</span>
-                        </div>
-                        <div class="controls">
-                            <div class="sort-controls">
-                                <label for="sortBy">排序</label>
-                                <select id="sortBy" onchange="sortTable()">
-                                    <option value="id">添加时间</option>
-                                    <option value="price">商品价格</option>
-                                    <option value="stockStatus">库存状态</option>
-                                </select>
-                                <select id="sortOrder" onchange="sortTable()" aria-label="排序方向">
-                                    <option value="desc">降序</option>
-                                    <option value="asc">升序</option>
-                                </select>
+                    <section class="workspace-card catalog-card" id="products">
+                        <div class="workspace-head">
+                            <div>
+                                <div class="workspace-title-line">
+                                    <h2>商品列表</h2>
+                                    <span id="recordCount" class="record-count">0 条记录</span>
+                                </div>
                             </div>
                         </div>
-                    </div>
 
-                    <div class="table-container">
-                        <table id="productsTable" class="products-table">
-                            <thead>
-                                <tr>
-                                    <th>商品名称</th>
-                                    <th>商品价格</th>
-                                    <th>库存状态</th>
-                                    <th>店铺名称</th>
-                                    <th>最后更新时间</th>
-                                    <th>操作</th>
-                                </tr>
-                            </thead>
-                            <tbody id="productsTableBody"></tbody>
-                        </table>
+                        <div class="table-toolbar">
+                            <div class="table-heading">
+                                <span class="table-kicker">LIVE CATALOG</span>
+                                <span class="table-hint">最近更新的商品排在前面</span>
+                            </div>
+                            <div class="controls">
+                                <button onclick="refreshAllData()" class="btn btn-quiet" type="button"><span aria-hidden="true">↻</span>刷新数据</button>
+                                <div class="sort-controls">
+                                    <label for="sortBy">排序</label>
+                                    <select id="sortBy" onchange="sortTable()">
+                                        <option value="id">添加时间</option>
+                                        <option value="price">商品价格</option>
+                                        <option value="stockStatus">库存状态</option>
+                                    </select>
+                                    <select id="sortOrder" onchange="sortTable()" aria-label="排序方向">
+                                        <option value="desc">降序</option>
+                                        <option value="asc">升序</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="table-container">
+                            <table id="productsTable" class="products-table">
+                                <thead>
+                                    <tr>
+                                        <th>商品名称</th>
+                                        <th>商品价格</th>
+                                        <th>库存状态</th>
+                                        <th>店铺名称</th>
+                                        <th>最后更新时间</th>
+                                        <th>操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="productsTableBody"></tbody>
+                            </table>
+                        </div>
+                    </section>
                     </div>
-                </section>
                 </div>
 
                 <section id="settingsView" class="settings-view" aria-labelledby="settingsTitle" hidden>
@@ -202,6 +209,26 @@
         <p>正在处理中...</p>
     </div>
     <div id="message" class="message" style="display: none;"></div>
+
+    <div id="editProductModal" class="modal-backdrop" hidden>
+        <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="editProductTitle">
+            <div class="modal-header">
+                <h2 id="editProductTitle">编辑商品</h2>
+                <button class="modal-close" type="button" onclick="closeEditProductModal()" aria-label="关闭编辑弹窗">×</button>
+            </div>
+            <form id="editProductForm" class="modal-form" onsubmit="saveProductName(event)">
+                <input id="editProductId" type="hidden">
+                <div class="modal-field">
+                    <label class="field-label" for="editProductName">商品名称</label>
+                    <input id="editProductName" class="url-input modal-input" type="text" maxlength="200" required>
+                </div>
+                <div class="modal-actions">
+                    <button class="btn btn-outline" type="button" onclick="closeEditProductModal()">取消</button>
+                    <button class="btn btn-primary" type="submit">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
 
     <script src="script.js"></script>
 </body>
