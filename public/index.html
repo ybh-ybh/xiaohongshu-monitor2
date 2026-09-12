@@ -140,6 +140,7 @@
                                         <th>商品价格</th>
                                         <th>库存状态</th>
                                         <th>店铺名称</th>
+                                        <th>实时监控</th>
                                         <th>最后更新时间</th>
                                         <th>操作</th>
                                     </tr>
@@ -186,6 +187,15 @@
                                 <p class="settings-hint">自动刷新商品库存的间隔，支持 1 到 59 分钟。</p>
                             </div>
 
+                            <div class="settings-field">
+                                <label class="field-label" for="settingsRealtimeInterval">实时监控间隔</label>
+                                <div class="settings-number-control">
+                                    <input id="settingsRealtimeInterval" class="url-input" type="number" min="2" max="60" step="1" required>
+                                    <span>秒</span>
+                                </div>
+                                <p class="settings-hint">开启实时监控的商品将在每次查询完成后按此间隔再次查询，支持 2 到 60 秒。</p>
+                            </div>
+
                             <div class="settings-field settings-test-field">
                                 <div>
                                     <div class="field-label">测试邮件</div>
@@ -227,6 +237,28 @@
                     <button class="btn btn-primary" type="submit">保存</button>
                 </div>
             </form>
+        </div>
+    </div>
+
+    <div id="skuModal" class="modal-backdrop" hidden>
+        <div class="modal-dialog sku-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="skuModalTitle">
+            <div class="modal-header">
+                <h2 id="skuModalTitle">选择监控 SKU</h2>
+                <button class="modal-close" type="button" onclick="closeSkuModal()" aria-label="关闭 SKU 配置弹窗">×</button>
+            </div>
+            <div class="modal-form sku-modal-form">
+                <input id="skuModalProductId" type="hidden">
+                <p id="skuModalHint" class="sku-modal-hint"></p>
+                <label class="sku-all-option">
+                    <input id="skuMonitorAll" type="checkbox" onchange="toggleSkuSelectionMode()" checked>
+                    <span>监控整商品（不限定 SKU）</span>
+                </label>
+                <div id="skuSelectionList" class="sku-selection-list"></div>
+                <div class="modal-actions">
+                    <button class="btn btn-outline" type="button" onclick="closeSkuModal()">取消</button>
+                    <button class="btn btn-primary" type="button" onclick="submitSkuModal()">保存监控配置</button>
+                </div>
+            </div>
         </div>
     </div>
 

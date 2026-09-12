@@ -1,7 +1,8 @@
 {
-  "nextId": 9,
+  "nextId": 20,
   "mail_recipients": [
     "ybh-ybh@qq.com"
   ],
-  "check_interval_minutes": 5
+  "check_interval_minutes": 5,
+  "real_time_check_interval_seconds": 10
 }

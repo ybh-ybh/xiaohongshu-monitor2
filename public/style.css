@@ -815,7 +815,7 @@ kbd {
 
 .products-table {
     width: 100%;
-    min-width: 760px;
+    min-width: 840px;
     border-collapse: collapse;
     font-size: 12px;
 }
@@ -861,6 +861,13 @@ kbd {
     font-weight: 700;
 }
 
+.sku-summary {
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 600;
+}
+
 .shop-name {
     max-width: 140px;
     color: var(--muted);
@@ -882,6 +889,68 @@ kbd {
 .update-time {
     color: var(--muted) !important;
     font-size: 11px;
+}
+
+/* 商品级实时监控开关，保持表格内尺寸稳定。 */
+.monitor-switch {
+    position: relative;
+    display: inline-flex;
+    width: 38px;
+    height: 22px;
+    vertical-align: middle;
+    cursor: pointer;
+}
+
+.monitor-switch input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+}
+
+.monitor-switch-slider {
+    position: absolute;
+    inset: 0;
+    background: #d7dce3;
+    border-radius: 11px;
+    transition: background 0.18s ease;
+}
+
+.monitor-switch-slider::after {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 16px;
+    height: 16px;
+    background: #fff;
+    border-radius: 50%;
+    box-shadow: 0 1px 3px rgba(23, 35, 55, 0.2);
+    content: "";
+    transition: transform 0.18s ease;
+}
+
+.monitor-switch input:checked + .monitor-switch-slider {
+    background: var(--teal);
+}
+
+.monitor-switch input:checked + .monitor-switch-slider::after {
+    transform: translateX(16px);
+}
+
+.monitor-switch input:focus-visible + .monitor-switch-slider {
+    outline: 3px solid rgba(37, 135, 200, 0.25);
+    outline-offset: 2px;
+}
+
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
 }
 
 .page-footer {
@@ -1087,6 +1156,80 @@ body.modal-open {
     justify-content: flex-end;
     gap: 9px;
     padding-top: 2px;
+}
+
+.sku-modal-dialog {
+    width: min(100%, 680px);
+}
+
+.sku-modal-form {
+    gap: 16px;
+}
+
+.sku-modal-hint {
+    overflow: hidden;
+    color: var(--muted);
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.sku-all-option,
+.sku-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    cursor: pointer;
+}
+
+.sku-all-option {
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--line);
+    color: var(--ink);
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.sku-selection-list {
+    display: grid;
+    max-height: 310px;
+    gap: 8px;
+    overflow-y: auto;
+    padding-right: 4px;
+}
+
+.sku-option {
+    align-items: center;
+    padding: 10px 12px;
+    background: #fafbfc;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    font-size: 12px;
+}
+
+.sku-option-main {
+    flex: 1;
+    color: var(--ink);
+    line-height: 1.5;
+}
+
+.sku-option-status {
+    flex: 0 0 auto;
+    font-size: 11px;
+}
+
+.sku-option-status .in_stock { color: var(--teal); }
+.sku-option-status .out_of_stock { color: var(--coral); }
+.sku-option-status .unknown { color: var(--muted); }
+
+.sku-empty {
+    margin: 0;
+    padding: 18px;
+    color: var(--muted);
+    background: #fafbfc;
+    border: 1px dashed var(--line);
+    border-radius: 8px;
+    font-size: 12px;
 }
 
 @media (max-width: 1060px) {

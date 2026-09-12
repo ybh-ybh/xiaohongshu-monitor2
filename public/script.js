@@ -1,4 +1,8 @@
 let productsData = [];
+// 保存待确认的商品预览，避免用户选择 SKU 时丢失后端返回的数据。
+let pendingSkuPreview = null;
+// 标记 SKU 弹窗当前是新增商品还是编辑已有商品。
+let skuModalMode = 'add';
 
 // 保存原始 fetch 方法，统一处理会话过期响应。
 const nativeFetch = window.fetch.bind(window);
@@ -121,7 +125,7 @@ function extractXhsUrl(text) {
     return null;
 }
 
-// 添加单个商品
+// 添加单个商品，先读取 SKU 再让用户确认监控范围。
 async function addProduct() {
     const urlInput = document.getElementById('productUrl');
     const inputText = urlInput.value.trim();
@@ -138,27 +142,62 @@ async function addProduct() {
         return;
     }
     
+    await previewProduct(url);
+}
+
+// 预览商品并打开 SKU 选择弹窗。
+async function previewProduct(url) {
+    // 显示读取商品规格的加载状态。
     showLoading();
-    
     try {
-        const response = await fetch('/api/products', {
+        const response = await fetch('/api/products/preview', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({ url })
         });
-        
+        // 读取商品和 SKU 组合数据。
         const result = await response.json();
-        
-        if (response.ok) {
-            showMessage('商品添加成功', 'success');
-            urlInput.value = '';
-            loadProducts();
-        } else {
-            showMessage(result.error || '添加失败', 'error');
+        if (!response.ok) {
+            showMessage(result.error || '读取商品 SKU 失败', 'error');
+            return;
         }
+        pendingSkuPreview = result;
+        skuModalMode = 'add';
+        openSkuModal(result.product, result.url);
     } catch (error) {
+        console.error('读取商品 SKU 失败:', error);
+        showMessage('网络错误，请稍后重试', 'error');
+    } finally {
+        hideLoading();
+    }
+}
+
+// 提交新增商品及用户选择的 SKU。
+async function confirmAddProduct() {
+    // 没有预览数据时直接关闭，避免提交不完整请求。
+    if (!pendingSkuPreview) return;
+    const monitoredSkuIds = getSelectedSkuIds();
+    showLoading();
+    try {
+        const response = await fetch('/api/products', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: pendingSkuPreview.url, skuIds: monitoredSkuIds })
+        });
+        const result = await response.json();
+        if (!response.ok) {
+            showMessage(result.error || '添加失败', 'error');
+            return;
+        }
+        closeSkuModal();
+        pendingSkuPreview = null;
+        document.getElementById('productUrl').value = '';
+        showMessage(monitoredSkuIds.length > 0 ? '商品及指定 SKU 添加成功' : '商品添加成功', 'success');
+        loadProducts();
+    } catch (error) {
+        // 处理接口不可用或网络异常。
         console.error('添加商品失败:', error);
         showMessage('网络错误，请稍后重试', 'error');
     } finally {
@@ -306,7 +345,7 @@ function renderTable() {
     if (productsData.length === 0) {
         tbody.innerHTML = `
             <tr>
-                <td colspan="6" style="text-align: center; padding: 40px; color: #6c757d;">
+                <td colspan="7" style="text-align: center; padding: 40px; color: #6c757d;">
                     暂无数据，请添加商品链接开始监控
                 </td>
             </tr>
@@ -320,6 +359,9 @@ function renderTable() {
                 <div class="product-name" title="${escapeHtml(product.name || '未知商品')}">
                     ${escapeHtml(product.name || '未知商品')}
                 </div>
+                <div class="sku-summary">${Array.isArray(product.monitored_skus) && product.monitored_skus.length > 0
+                    ? `指定 ${product.monitored_skus.length} 个 SKU`
+                    : '整商品监控'}</div>
             </td>
             <td class="price">${formatPrice(product.price)}</td>
             <td class="stock-status ${String(product.stockStatus || 'UNKNOWN').toLowerCase()}">
@@ -330,9 +372,17 @@ function renderTable() {
                     ${escapeHtml(product.shop_name || product.shopName || '未知店铺')}
                 </div>
             </td>
+            <td>
+                <label class="monitor-switch" title="${product.realtime_monitoring === true ? '关闭实时监控' : '开启实时监控'}">
+                    <input type="checkbox" ${product.realtime_monitoring === true ? 'checked' : ''} onchange="toggleRealtimeMonitoring(${product.id}, this.checked)">
+                    <span class="monitor-switch-slider" aria-hidden="true"></span>
+                    <span class="sr-only">实时监控</span>
+                </label>
+            </td>
             <td class="update-time">${formatTime(product.last_update)}</td>
             <td>
                 <a href="${product.url}" target="_blank" rel="noopener noreferrer" class="btn btn-info btn-small" aria-label="查看${escapeHtml(product.name || '商品')}">查看商品</a>
+                ${Array.isArray(product.skus) && product.skus.length > 0 ? `<button onclick="openEditSkuModal(${product.id})" class="btn btn-edit btn-small" type="button">SKU</button>` : ''}
                 <button onclick="openEditProductModal(${product.id})" class="btn btn-edit btn-small" type="button">编辑</button>
                 <button onclick="refreshProduct(${product.id})" class="btn btn-success btn-small">刷新</button>
                 <button onclick="deleteProduct(${product.id})" class="btn btn-danger btn-small">删除</button>
@@ -510,6 +560,138 @@ async function saveProductName(event) {
     }
 }
 
+// 更新商品实时监控开关并立即同步服务端定时器。
+async function toggleRealtimeMonitoring(productId, enabled) {
+    try {
+        const response = await fetch(`/api/products/${productId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ realtimeMonitoring: enabled })
+        });
+        const result = await response.json();
+        if (!response.ok) {
+            showMessage(result.error || '实时监控设置失败', 'error');
+            loadProducts();
+            return;
+        }
+        showMessage(enabled ? '已开启实时监控' : '已关闭实时监控', 'success');
+        loadProducts();
+    } catch (error) {
+        // 网络失败时重新加载列表，恢复开关的真实状态。
+        console.error('更新实时监控设置失败:', error);
+        showMessage('网络错误，请稍后重试', 'error');
+        loadProducts();
+    }
+}
+
+// 打开 SKU 监控配置弹窗并渲染当前商品的规格组合。
+function openSkuModal(product, url = product.url) {
+    const modal = document.getElementById('skuModal');
+    const title = document.getElementById('skuModalTitle');
+    const hint = document.getElementById('skuModalHint');
+    const allCheckbox = document.getElementById('skuMonitorAll');
+    const urlInput = document.getElementById('skuModalProductId');
+    if (!modal || !product) return;
+    title.textContent = skuModalMode === 'add' ? '选择监控 SKU' : '编辑监控 SKU';
+    hint.textContent = `${product.name || '未知商品'}${url ? ` · ${url}` : ''}`;
+    urlInput.value = product.id || '';
+    const monitoredIds = new Set((product.monitored_skus || []).map(id => String(id)));
+    allCheckbox.checked = monitoredIds.size === 0;
+    renderSkuSelection(product.skus || [], monitoredIds);
+    toggleSkuSelectionMode();
+    modal.hidden = false;
+    document.body.classList.add('modal-open');
+}
+
+// 渲染 SKU 组合复选框并标记当前已选项。
+function renderSkuSelection(skus, monitoredIds) {
+    const list = document.getElementById('skuSelectionList');
+    if (!list) return;
+    if (!Array.isArray(skus) || skus.length === 0) {
+        list.innerHTML = '<p class="sku-empty">当前页面未返回可选 SKU，保存后将按整商品监控。</p>';
+        return;
+    }
+    list.innerHTML = skus.map(sku => `
+        <label class="sku-option">
+            <input type="checkbox" class="sku-checkbox" value="${escapeHtml(sku.id)}" ${monitoredIds.has(String(sku.id)) ? 'checked' : ''}>
+            <span class="sku-option-main">${escapeHtml(sku.name || sku.id)}</span>
+            <span class="sku-option-status ${String(sku.stockStatus || 'UNKNOWN').toLowerCase()}">${formatStockStatus(sku.stockStatus, sku.stockReason)}</span>
+        </label>
+    `).join('');
+}
+
+// 根据“整商品监控”开关启用或禁用 SKU 复选框。
+function toggleSkuSelectionMode() {
+    const allCheckbox = document.getElementById('skuMonitorAll');
+    document.querySelectorAll('.sku-checkbox').forEach(checkbox => {
+        checkbox.disabled = Boolean(allCheckbox?.checked);
+    });
+}
+
+// 读取当前弹窗中用户选择的 SKU 编号。
+function getSelectedSkuIds() {
+    const allCheckbox = document.getElementById('skuMonitorAll');
+    if (allCheckbox?.checked) return [];
+    return Array.from(document.querySelectorAll('.sku-checkbox:checked')).map(checkbox => checkbox.value);
+}
+
+// 保存已有商品的 SKU 监控配置。
+async function saveSkuConfig() {
+    const productId = document.getElementById('skuModalProductId')?.value;
+    const monitoredSkuIds = getSelectedSkuIds();
+    if (!productId) return;
+    showLoading();
+    try {
+        const response = await fetch(`/api/products/${productId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ skuIds: monitoredSkuIds })
+        });
+        const result = await response.json();
+        if (!response.ok) {
+            showMessage(result.error || 'SKU 配置保存失败', 'error');
+            return;
+        }
+        closeSkuModal();
+        showMessage(monitoredSkuIds.length > 0 ? '指定 SKU 已保存' : '已恢复整商品监控', 'success');
+        loadProducts();
+    } catch (error) {
+        // 处理接口不可用或网络异常。
+        console.error('保存 SKU 配置失败:', error);
+        showMessage('网络错误，请稍后重试', 'error');
+    } finally {
+        hideLoading();
+    }
+}
+
+// 关闭 SKU 配置弹窗并清理临时状态。
+function closeSkuModal() {
+    const modal = document.getElementById('skuModal');
+    if (modal) modal.hidden = true;
+    document.body.classList.remove('modal-open');
+    pendingSkuPreview = null;
+}
+
+// 打开已有商品的 SKU 配置弹窗。
+function openEditSkuModal(productId) {
+    const product = productsData.find(item => item.id === productId);
+    if (!product) {
+        showMessage('商品不存在，请刷新列表后重试', 'error');
+        return;
+    }
+    skuModalMode = 'edit';
+    openSkuModal(product, product.url);
+}
+
+// 根据弹窗模式执行新增或编辑保存操作。
+function submitSkuModal() {
+    if (skuModalMode === 'add') {
+        confirmAddProduct();
+    } else {
+        saveSkuConfig();
+    }
+}
+
 // 测试当前邮件配置是否能够发送邮件。
 async function testEmail() {
     // 显示邮件测试请求的加载状态。
@@ -574,6 +756,7 @@ document.getElementById('productUrl').addEventListener('keypress', function(e) {
 document.addEventListener('keydown', function(event) {
     if (event.key === 'Escape') {
         closeEditProductModal();
+        closeSkuModal();
     }
 });
 
@@ -581,6 +764,13 @@ document.addEventListener('keydown', function(event) {
 document.getElementById('editProductModal').addEventListener('click', function(event) {
     if (event.target === event.currentTarget) {
         closeEditProductModal();
+    }
+});
+
+// 点击 SKU 弹窗遮罩区域时关闭弹窗。
+document.getElementById('skuModal').addEventListener('click', function(event) {
+    if (event.target === event.currentTarget) {
+        closeSkuModal();
     }
 });
 
@@ -622,8 +812,11 @@ async function loadSettings() {
         const recipientsEl = document.getElementById('settingsRecipients');
         // 获取刷新间隔输入框。
         const intervalEl = document.getElementById('settingsInterval');
+        // 获取实时监控间隔输入框。
+        const realtimeIntervalEl = document.getElementById('settingsRealtimeInterval');
         if (recipientsEl) recipientsEl.value = (settings.mailRecipients || []).join(', ');
         if (intervalEl) intervalEl.value = settings.checkIntervalMinutes || 5;
+        if (realtimeIntervalEl) realtimeIntervalEl.value = settings.realTimeCheckIntervalSeconds || 10;
     } catch (error) {
         // 设置页加载失败时保留表单默认值，不影响库存列表使用。
         console.error('加载设置失败:', error);
@@ -638,11 +831,20 @@ async function saveSettings(event) {
     const recipientsEl = document.getElementById('settingsRecipients');
     // 获取刷新间隔输入框。
     const intervalEl = document.getElementById('settingsInterval');
+    // 获取实时监控间隔输入框。
+    const realtimeIntervalEl = document.getElementById('settingsRealtimeInterval');
     // 读取并校验刷新间隔数值。
     const checkIntervalMinutes = Number(intervalEl.value);
     if (!Number.isInteger(checkIntervalMinutes) || checkIntervalMinutes < 1 || checkIntervalMinutes > 59) {
         showMessage('刷新间隔必须是 1 到 59 之间的整数分钟', 'error');
         intervalEl.focus();
+        return;
+    }
+    // 读取并校验实时监控间隔数值。
+    const realTimeCheckIntervalSeconds = Number(realtimeIntervalEl.value);
+    if (!Number.isInteger(realTimeCheckIntervalSeconds) || realTimeCheckIntervalSeconds < 2 || realTimeCheckIntervalSeconds > 60) {
+        showMessage('实时监控间隔必须是 2 到 60 之间的整数秒', 'error');
+        realtimeIntervalEl.focus();
         return;
     }
 
@@ -654,7 +856,8 @@ async function saveSettings(event) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 mailRecipients: recipientsEl.value,
-                checkIntervalMinutes
+                checkIntervalMinutes,
+                realTimeCheckIntervalSeconds
             })
         });
         // 读取后端返回的保存结果。
@@ -667,6 +870,7 @@ async function saveSettings(event) {
         // 用后端规范化后的值回填表单，保持界面与实际配置一致。
         recipientsEl.value = (result.mailRecipients || []).join(', ');
         intervalEl.value = result.checkIntervalMinutes;
+        realtimeIntervalEl.value = result.realTimeCheckIntervalSeconds;
         showMessage('设置已保存', 'success');
     } catch (error) {
         // 处理服务不可用或网络异常。

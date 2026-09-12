@@ -55,6 +55,10 @@ let activePort = PORT;
 const DEFAULT_CHECK_INTERVAL_MINUTES = Math.max(1, parseInt(process.env.CHECK_INTERVAL_MINUTES || '5', 10));
 // 保存当前运行中的轮询间隔。
 let checkIntervalMinutes = DEFAULT_CHECK_INTERVAL_MINUTES;
+// 读取实时监控默认间隔，限制在设置页允许的秒数范围内。
+const DEFAULT_REAL_TIME_CHECK_INTERVAL_SECONDS = 10;
+// 保存当前运行中的实时监控间隔。
+let realTimeCheckIntervalSeconds = normalizeRealTimeCheckIntervalSeconds(process.env.REAL_TIME_CHECK_INTERVAL_SECONDS, DEFAULT_REAL_TIME_CHECK_INTERVAL_SECONDS);
 // 读取是否使用无头浏览器的配置。
 const HEADLESS = String(process.env.HEADLESS || 'true').toLowerCase() !== 'false';
 // 保存浏览器登录态的目录，避免每次抓取都重新登录。
@@ -301,12 +305,23 @@ let mailRecipientsOverride = null;
 let refreshInProgress = false;
 // 保存当前定时任务实例，配置变更时先停止旧任务。
 let refreshTask = null;
+// 保存每个实时商品的独立定时器。
+const realtimeRefreshTimers = new Map();
+// 保存每个商品正在执行的刷新 promise，避免同一商品重复查询。
+const productRefreshPromises = new Map();
 
 // 将刷新间隔转换为受支持的分钟数。
 function normalizeCheckIntervalMinutes(value, fallback = DEFAULT_CHECK_INTERVAL_MINUTES) {
     // 仅接受 1 到 59 分钟，确保 node-cron 的分钟步长有效。
     const parsed = Number.parseInt(value, 10);
     return Number.isInteger(parsed) && parsed >= 1 && parsed <= 59 ? parsed : fallback;
+}
+
+// 将实时监控间隔转换为受支持的秒数。
+function normalizeRealTimeCheckIntervalSeconds(value, fallback = DEFAULT_REAL_TIME_CHECK_INTERVAL_SECONDS) {
+    // 仅接受 2 到 60 秒的整数，避免请求过于频繁或失去实时性。
+    const parsed = Number(value);
+    return Number.isInteger(parsed) && parsed >= 2 && parsed <= 60 ? parsed : fallback;
 }
 
 // 将收件人输入转换为去重后的邮箱列表。
@@ -415,7 +430,7 @@ async function sendRestockEmail(product, productData) {
         console.warn('未配置完整邮件参数，跳过补货邮件通知。');
         return false;
     }
-    // 发送包含商品名称、价格、库存状态和直达链接的邮件。
+    // 发送包含商品名称、价格、库存状态、指定 SKU 和直达链接的邮件。
     await transporter.sendMail({
         from: process.env.MAIL_USERNAME,
         to: recipients,
@@ -426,6 +441,9 @@ async function sendRestockEmail(product, productData) {
             `价格：${productData.price || product.price || '未知'}`,
             `库存状态：${productData.stockStatus}`,
             `检测依据：${productData.stockReason || '可购买控件'}`,
+            ...(Array.isArray(productData.monitoredSkuStatuses) && productData.monitoredSkuStatuses.length > 0
+                ? [`指定 SKU：${productData.monitoredSkuStatuses.map(sku => `${sku.name}（${sku.stockStatus}）`).join('；')}`]
+                : []),
             `链接：${product.url}`
         ].join('\n')
     });
@@ -437,7 +455,13 @@ async function sendRestockEmail(product, productData) {
 async function applyProductData(product, productData) {
     // 仅把明确的 OUT_OF_STOCK -> IN_STOCK 迁移视为补货事件。
     const previousStockStatus = product.stockStatus || 'UNKNOWN';
-    Object.assign(product, productData, { last_checked_at: new Date().toISOString() });
+    // 未读取规格时保留历史 SKU 数据，避免整商品刷新后无法再次编辑监控范围。
+    const nextProductData = { ...productData };
+    if ((!Array.isArray(productData.skus) || productData.skus.length === 0) && Array.isArray(product.skus) && product.skus.length > 0) {
+        delete nextProductData.skus;
+        delete nextProductData.skuOptions;
+    }
+    Object.assign(product, nextProductData, { last_checked_at: new Date().toISOString() });
     const restocked = previousStockStatus === 'OUT_OF_STOCK' && productData.stockStatus === 'IN_STOCK';
     if (restocked) {
         try {
@@ -461,6 +485,11 @@ function loadData() {
         if (fs.existsSync(PRODUCTS_FILE)) {
             const productsJson = fs.readFileSync(PRODUCTS_FILE, 'utf8');
             products = JSON.parse(productsJson);
+            // 兼容旧商品数据，未配置实时监控时继续使用原来的全局刷新任务。
+            products = products.map(product => ({
+                ...product,
+                realtime_monitoring: product.realtime_monitoring === true
+            }));
             console.log(`加载了 ${products.length} 个商品数据`);
         }
 
@@ -483,6 +512,10 @@ function loadData() {
             // 读取配置页保存的刷新间隔，非法值回退到环境变量默认值。
             if (Object.prototype.hasOwnProperty.call(config, 'check_interval_minutes')) {
                 checkIntervalMinutes = normalizeCheckIntervalMinutes(config.check_interval_minutes);
+            }
+            // 读取配置页保存的实时监控间隔，非法值回退到默认值。
+            if (Object.prototype.hasOwnProperty.call(config, 'real_time_check_interval_seconds')) {
+                realTimeCheckIntervalSeconds = normalizeRealTimeCheckIntervalSeconds(config.real_time_check_interval_seconds);
             }
             console.log(`下一个ID: ${nextId}`);
         }
@@ -512,7 +545,8 @@ function saveData() {
         const config = {
             nextId,
             mail_recipients: getMailRecipients(),
-            check_interval_minutes: checkIntervalMinutes
+            check_interval_minutes: checkIntervalMinutes,
+            real_time_check_interval_seconds: realTimeCheckIntervalSeconds
         };
         fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
 
@@ -520,6 +554,104 @@ function saveData() {
     } catch (error) {
         console.error('保存数据失败:', error);
     }
+}
+
+// 清理指定商品已有的实时监控定时器。
+function clearRealtimeProductRefreshTimer(productId) {
+    // 取出并取消该商品的待执行任务。
+    const timer = realtimeRefreshTimers.get(productId);
+    if (timer) clearTimeout(timer);
+    realtimeRefreshTimers.delete(productId);
+}
+
+// 在商品查询完成后安排下一次实时监控查询。
+function scheduleRealtimeProductRefresh(product) {
+    // 先取消旧任务，保证同一商品最多只有一个定时器。
+    clearRealtimeProductRefreshTimer(product.id);
+    if (product.realtime_monitoring !== true) return;
+    // 从本次查询完成时开始计算实时监控间隔。
+    const timer = setTimeout(async () => {
+        realtimeRefreshTimers.delete(product.id);
+        const currentProduct = products.find(item => item.id === product.id);
+        if (!currentProduct || currentProduct.realtime_monitoring !== true) return;
+        try {
+            await refreshProductData(currentProduct, { source: 'realtime' });
+        } catch (error) {
+            // 查询失败后由 refreshProductData 的 finally 继续安排下一次查询。
+            console.error(`实时监控商品 ${currentProduct.name} 刷新失败:`, error.message);
+        }
+    }, realTimeCheckIntervalSeconds * 1000);
+    realtimeRefreshTimers.set(product.id, timer);
+}
+
+// 按指定商品执行一次查询、保存库存和销量数据。
+function refreshProductData(product, options = {}) {
+    // 已有查询时复用同一个 promise，避免不同来源重复访问小红书。
+    const existingPromise = productRefreshPromises.get(product.id);
+    if (existingPromise) return existingPromise;
+
+    // 记录调用来源和手动刷新是否需要覆盖当天销量记录。
+    const source = options.source || 'manual';
+    const replaceToday = options.replaceToday === true;
+    const refreshPromise = (async () => {
+        // 实时监控和指定 SKU 商品都需要读取规格组合。
+        const productData = await scrapeProductData(product.url, {
+            includeSkus: Array.isArray(product.monitored_skus) && product.monitored_skus.length > 0,
+            monitoredSkuIds: product.monitored_skus || []
+        });
+        // 更新商品库存、名称和最后查询时间。
+        await applyProductData(product, productData);
+
+        // 记录销量数据；实时查询最多每小时追加一条历史记录。
+        const now = new Date();
+        const today = now.toISOString().split('T')[0];
+        const existingTodayData = salesData.find(item => item.product_id === product.id && item.crawl_date === today);
+        let salesRecorded = false;
+        if (replaceToday) {
+            salesData = salesData.filter(item => !(item.product_id === product.id && item.crawl_date === today));
+            salesData.push({
+                product_id: product.id,
+                product_sales: productData.productSales,
+                shop_sales: productData.shopSales,
+                crawl_date: today,
+                crawl_time: now.toISOString()
+            });
+            salesRecorded = true;
+        } else if (!existingTodayData || (now - new Date(existingTodayData.crawl_time)) > 60 * 60 * 1000) {
+            salesData.push({
+                product_id: product.id,
+                product_sales: productData.productSales,
+                shop_sales: productData.shopSales,
+                crawl_date: today,
+                crawl_time: now.toISOString()
+            });
+            salesRecorded = true;
+        }
+        // 持久化商品、销量和配置数据。
+        saveData();
+        return { productData, salesRecorded, source };
+    })();
+
+    // 无论成功还是失败，都从完成时刻开始安排下一次实时查询。
+    const trackedPromise = refreshPromise.finally(() => {
+        productRefreshPromises.delete(product.id);
+        const currentProduct = products.find(item => item.id === product.id);
+        if (currentProduct && currentProduct.realtime_monitoring === true) {
+            scheduleRealtimeProductRefresh(currentProduct);
+        }
+    });
+    productRefreshPromises.set(product.id, trackedPromise);
+    return trackedPromise;
+}
+
+// 服务启动时恢复所有已开启的实时监控任务。
+function scheduleAllRealtimeProductRefreshes() {
+    // 旧商品默认关闭实时监控，不会被意外切换到高频查询。
+    for (const [productId] of realtimeRefreshTimers) {
+        const product = products.find(item => item.id === productId);
+        if (!product || product.realtime_monitoring !== true) clearRealtimeProductRefreshTimer(productId);
+    }
+    products.filter(product => product.realtime_monitoring === true).forEach(scheduleRealtimeProductRefresh);
 }
 
 // 启动时加载数据
@@ -692,8 +824,115 @@ function parseSalesNumber(salesText) {
     return parseInt(text.replace(/[^\d]/g, '')) || 0;
 }
 
+// 将小红书 variant 接口的库存枚举转换为系统统一状态。
+function normalizeSkuStockStatus(status) {
+    // 小红书 1 表示有货，2 表示售罄，其他状态暂不做乐观判断。
+    if (status === 1 || status === '1' || status === 'STOCK_STATUS_NORMAL') return 'IN_STOCK';
+    if (status === 2 || status === '2' || status === 'STOCK_STATUS_SOLDOUT') return 'OUT_OF_STOCK';
+    return 'UNKNOWN';
+}
+
+// 从 variant 接口响应中提取规格选项和完整 SKU 组合。
+function extractSkuDataFromVariantResponse(payload) {
+    // 兼容接口字段的 snake_case 和当前页面返回的嵌套结构。
+    const commonData = payload?.data?.common_data || payload?.data?.commonData || {};
+    const skuListCommon = commonData.skuListCommon || commonData.sku_list_common || {};
+    const skuList = Array.isArray(skuListCommon.skuList || skuListCommon.sku_list)
+        ? (skuListCommon.skuList || skuListCommon.sku_list)
+        : [];
+    const firstSkuList = skuList[0] || {};
+    const rawOptions = Array.isArray(firstSkuList.skuOptions || firstSkuList.sku_options)
+        ? (firstSkuList.skuOptions || firstSkuList.sku_options)
+        : [];
+    const options = rawOptions.map(option => ({
+        id: String(option.id || ''),
+        name: String(option.name || ''),
+        values: Array.isArray(option.values) ? option.values.map(value => String(value)) : [],
+        soldOutValues: Array.isArray(option.soldOutValues || option.sold_out_values)
+            ? (option.soldOutValues || option.sold_out_values).map(value => String(value))
+            : []
+    })).filter(option => option.id && option.name && option.values.length > 0);
+
+    // variant 数据可能分布在一个或多个 template_data 项中。
+    const templateData = Array.isArray(payload?.data?.template_data || payload?.data?.templateData)
+        ? (payload.data.template_data || payload.data.templateData)
+        : [];
+    const skus = [];
+    templateData.forEach(item => {
+        // 每个 contentE1 对应一个可监控的完整规格组合。
+        const content = item?.contentE1 || item?.content_e1;
+        if (!content?.id || !Array.isArray(content.variants)) return;
+        const variants = content.variants.map(variant => ({
+            id: String(variant.id || ''),
+            name: String(variant.name || ''),
+            value: String(variant.value || '')
+        })).filter(variant => variant.id && variant.name && variant.value);
+        if (variants.length === 0) return;
+        // 同一组合在部分页面版本中会在多个展示区重复出现，只保留一份。
+        if (skus.some(sku => sku.id === String(content.id))) return;
+        skus.push({
+            id: String(content.id),
+            name: variants.map(variant => `${variant.name}: ${variant.value}`).join(' / '),
+            variants,
+            price: Number(content.price) || 0,
+            stockStatus: normalizeSkuStockStatus(content.stockStatus),
+            stockReason: normalizeSkuStockStatus(content.stockStatus) === 'IN_STOCK' ? '可购买' :
+                (normalizeSkuStockStatus(content.stockStatus) === 'OUT_OF_STOCK' ? '已售罄' : '库存状态待确认')
+        });
+    });
+
+    return { options, skus };
+}
+
+// 打开商品规格弹层并读取小红书返回的完整 SKU 组合。
+async function fetchSkuData(page) {
+    // 通过页面真实点击触发 variant 接口，避免猜测接口签名或绕过页面上下文。
+    try {
+        const responsePromise = page.waitForResponse(response =>
+            response.request().method() === 'GET' &&
+            response.url().includes('/api/store/jpd/edith/detail/h5/toc/variant'),
+            { timeout: 12000 }
+        );
+        const clicked = await page.evaluate(() => {
+            // “已选”文本是规格弹层在不同页面版本中都保留的稳定入口。
+            const target = Array.from(document.querySelectorAll('body *'))
+                .find(element => (element.textContent || '').trim() === '已选');
+            if (!target) return false;
+            target.click();
+            return true;
+        });
+        if (!clicked) return { options: [], skus: [] };
+        const response = await responsePromise;
+        const payload = await response.json();
+        return extractSkuDataFromVariantResponse(payload);
+    } catch (error) {
+        // 规格弹层不可用时保留空结果，商品级监控仍按原有逻辑运行。
+        console.warn('读取商品 SKU 数据失败:', error.message);
+        return { options: [], skus: [] };
+    }
+}
+
+// 根据用户指定的 SKU 汇总商品级库存状态。
+function applyMonitoredSkuStatus(productData, monitoredSkuIds) {
+    // 空数组代表未指定 SKU，保持原有整商品监控行为。
+    const ids = Array.isArray(monitoredSkuIds) ? monitoredSkuIds.map(id => String(id)) : [];
+    if (ids.length === 0) return productData;
+    const selectedSkus = ids.map(id => productData.skus.find(sku => sku.id === id)).filter(Boolean);
+    const selectedStatuses = ids.map(id => {
+        const sku = productData.skus.find(item => item.id === id);
+        return sku ? { id, name: sku.name, stockStatus: sku.stockStatus, stockReason: sku.stockReason } :
+            { id, name: id, stockStatus: 'UNKNOWN', stockReason: '未找到该 SKU' };
+    });
+    const hasInStock = selectedSkus.some(sku => sku.stockStatus === 'IN_STOCK');
+    const allOutOfStock = selectedSkus.length === ids.length && selectedSkus.every(sku => sku.stockStatus === 'OUT_OF_STOCK');
+    productData.monitoredSkuStatuses = selectedStatuses;
+    productData.stockStatus = hasInStock ? 'IN_STOCK' : (allOutOfStock ? 'OUT_OF_STOCK' : 'UNKNOWN');
+    productData.stockReason = hasInStock ? '指定 SKU 有货' : (allOutOfStock ? '指定 SKU 均已售罄' : '指定 SKU 状态待确认');
+    return productData;
+}
+
 // 爬取商品数据
-async function scrapeProductData(url) {
+async function scrapeProductData(url, options = {}) {
     console.log('开始爬取商品数据:', url);
 
     // 使用统一浏览器实例以复用小红书登录态。
@@ -999,6 +1238,9 @@ async function scrapeProductData(url) {
 
         console.log('提取到的原始数据:', data);
 
+        // 预览、新增指定 SKU 或已有指定 SKU 刷新时读取规格组合。
+        const skuData = options.includeSkus ? await fetchSkuData(page) : { options: [], skus: [] };
+
         const result = {
             name: data.debug.extractedInfo.name || data.name,
             price: data.debug.extractedInfo.price || data.price,
@@ -1006,9 +1248,13 @@ async function scrapeProductData(url) {
             shopName: data.debug.extractedInfo.shopName || data.shopName,
             shopSales: parseSalesNumber(data.debug.extractedInfo.shopSales || data.shopSalesText),
             stockStatus: data.stockStatus || 'UNKNOWN',
-            stockReason: data.stockReason || '未找到明确库存依据'
+            stockReason: data.stockReason || '未找到明确库存依据',
+            skuOptions: skuData.options,
+            skus: skuData.skus
         };
 
+        // 指定 SKU 时，以选中组合的库存结果覆盖商品级文案。
+        applyMonitoredSkuStatus(result, options.monitoredSkuIds);
         console.log('处理后的数据:', result);
         return result;
 
@@ -1021,9 +1267,32 @@ async function scrapeProductData(url) {
     }
 }
 
+// 预览商品及其可选 SKU，不写入监控列表。
+app.post('/api/products/preview', async (req, res) => {
+    // 读取前端提交的商品链接或分享文本。
+    const { url } = req.body || {};
+    if (!url) return res.status(400).json({ error: '请提供商品链接或分享文本' });
+    try {
+        // 先解析短链接，再抓取商品和完整规格组合。
+        const processedUrl = await processXhsUrl(url);
+        const productData = await scrapeProductData(processedUrl, { includeSkus: true });
+        return res.json({ url: processedUrl, product: productData });
+    } catch (error) {
+        // 预览失败不改动已有商品数据。
+        console.error('预览商品失败:', error);
+        return res.status(500).json({ error: '获取商品 SKU 失败: ' + error.message });
+    }
+});
+
 // 添加商品
 app.post('/api/products', async (req, res) => {
-    const { url } = req.body;
+    // 同时兼容前端使用的 skuIds 和直接传入的 skus 字段。
+    const { url, skuIds, skus: requestedSkus } = req.body || {};
+    const monitoredSkuIds = Array.isArray(skuIds)
+        ? [...new Set(skuIds.map(id => String(id).trim()).filter(Boolean))]
+        : (Array.isArray(requestedSkus)
+            ? [...new Set(requestedSkus.map(sku => String(sku?.id || sku).trim()).filter(Boolean))]
+            : []);
 
     if (!url) {
         return res.status(400).json({ error: '请提供商品链接或分享文本' });
@@ -1041,14 +1310,27 @@ app.post('/api/products', async (req, res) => {
             return res.status(400).json({ error: '该商品已存在' });
         }
 
-        // 爬取商品数据
-        const productData = await scrapeProductData(processedUrl);
+        // 爬取商品数据和 SKU 组合，并按用户选择汇总库存状态。
+        const productData = await scrapeProductData(processedUrl, {
+            includeSkus: true,
+            monitoredSkuIds
+        });
+
+        // 选中的 SKU 必须来自当前商品，避免保存失效或伪造的编号。
+        const availableSkuIds = new Set(productData.skus.map(sku => sku.id));
+        const invalidSkuIds = monitoredSkuIds.filter(id => !availableSkuIds.has(id));
+        if (invalidSkuIds.length > 0) {
+            return res.status(400).json({ error: `指定的 SKU 不存在或已失效：${invalidSkuIds.join('、')}` });
+        }
 
         // 保存商品信息
         const product = {
             id: nextId++,
             url: processedUrl, // 保存处理后的长链接
             ...productData,
+            monitored_skus: monitoredSkuIds,
+            // 新增商品默认开启实时监控。
+            realtime_monitoring: true,
             created_at: new Date().toISOString()
         };
 
@@ -1066,6 +1348,8 @@ app.post('/api/products', async (req, res) => {
 
         // 保存数据到文件
         saveData();
+        // 新商品首次查询已完成，从此刻开始计算下一次实时查询。
+        scheduleRealtimeProductRefresh(product);
 
         console.log('商品添加成功:', product);
         res.json({
@@ -1114,8 +1398,8 @@ app.get('/api/products', (req, res) => {
                 daily_shop_sales: dailyShopSales,
                 // 商品日GMV
                 daily_gmv: dailyProductSales * product.price,
-                // 最后更新时间
-                last_update: todayData ? todayData.crawl_time : product.created_at,
+                // 最后更新时间优先使用库存查询时间，实时监控时不会被销量采样时间掩盖。
+                last_update: product.last_checked_at || (todayData ? todayData.crawl_time : product.created_at),
                 // 确保店铺名称正确显示
                 shop_name: product.shopName || '未知店铺'
             };
@@ -1139,32 +1423,8 @@ app.post('/api/products/:id/refresh', async (req, res) => {
 
     try {
         console.log('刷新商品数据:', product.url);
-        const productData = await scrapeProductData(product.url);
-
-        // 更新商品基本信息
-        await applyProductData(product, productData);
-
-        // 添加新的销量数据
-        const today = new Date().toISOString().split('T')[0];
-
-        // 删除今天的旧数据（如果存在）
-        salesData = salesData.filter(s =>
-            !(s.product_id === productId && s.crawl_date === today)
-        );
-
-        // 添加新数据
-        salesData.push({
-            product_id: productId,
-            product_sales: productData.productSales,
-            shop_sales: productData.shopSales,
-            crawl_date: today,
-            crawl_time: new Date().toISOString()
-        });
-
-        // 保存数据到文件
-        saveData();
-
-        res.json({ message: '数据刷新成功', data: productData });
+        const result = await refreshProductData(product, { source: 'manual', replaceToday: true });
+        res.json({ message: '数据刷新成功', data: result.productData });
 
     } catch (error) {
         console.error('刷新数据失败:', error);
@@ -1172,7 +1432,7 @@ app.post('/api/products/:id/refresh', async (req, res) => {
     }
 });
 
-// 更新商品名称，仅允许修改名称字段，避免覆盖商品的采集数据。
+// 更新商品名称、指定监控 SKU 或实时监控开关，仅允许修改明确的配置字段。
 app.patch('/api/products/:id', (req, res) => {
     // 解析路由中的商品编号。
     const productId = parseInt(req.params.id, 10);
@@ -1184,19 +1444,57 @@ app.patch('/api/products/:id', (req, res) => {
 
     // 读取并清理前端提交的商品名称。
     const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
-    if (!name) {
-        return res.status(400).json({ error: '商品名称不能为空' });
-    }
-    if (name.length > 200) {
+    if (name && name.length > 200) {
         return res.status(400).json({ error: '商品名称不能超过 200 个字符' });
     }
 
-    // 持久化新的商品名称。
-    product.name = name;
+    // 兼容 skuIds 和 monitoredSkuIds 两种请求字段。
+    const skuField = Object.prototype.hasOwnProperty.call(req.body || {}, 'skuIds')
+        ? req.body.skuIds
+        : req.body?.monitoredSkuIds;
+    const hasSkuUpdate = skuField !== undefined;
+    // 兼容前端使用的 realtimeMonitoring 和持久化字段名。
+    const realtimeField = Object.prototype.hasOwnProperty.call(req.body || {}, 'realtimeMonitoring')
+        ? req.body.realtimeMonitoring
+        : req.body?.realtime_monitoring;
+    // 判断本次请求是否包含实时监控开关变更。
+    const hasRealtimeUpdate = realtimeField !== undefined;
+    if (hasRealtimeUpdate && typeof realtimeField !== 'boolean') {
+        return res.status(400).json({ error: 'realtimeMonitoring 必须是布尔值' });
+    }
+    let monitoredSkuIds = product.monitored_skus || [];
+    if (hasSkuUpdate) {
+        if (!Array.isArray(skuField)) {
+            return res.status(400).json({ error: 'skuIds 必须是数组' });
+        }
+        monitoredSkuIds = [...new Set(skuField.map(id => String(id).trim()).filter(Boolean))];
+        const availableSkuIds = new Set(Array.isArray(product.skus) ? product.skus.map(sku => String(sku.id)) : []);
+        const invalidSkuIds = monitoredSkuIds.filter(id => !availableSkuIds.has(id));
+        if (invalidSkuIds.length > 0) {
+            return res.status(400).json({ error: `指定的 SKU 不存在或已失效：${invalidSkuIds.join('、')}` });
+        }
+        product.monitored_skus = monitoredSkuIds;
+        applyMonitoredSkuStatus(product, monitoredSkuIds);
+    }
+    // 更新实时监控开关并同步对应的独立定时器。
+    if (hasRealtimeUpdate) {
+        product.realtime_monitoring = realtimeField;
+        if (realtimeField) {
+            scheduleRealtimeProductRefresh(product);
+        } else {
+            clearRealtimeProductRefreshTimer(product.id);
+        }
+    }
+
+    // 没有商品名称时允许只更新 SKU 配置。
+    if (name) product.name = name;
+    if (!name && !hasSkuUpdate && !hasRealtimeUpdate) {
+        return res.status(400).json({ error: '请提供商品名称、skuIds 或 realtimeMonitoring' });
+    }
     saveData();
 
     res.json({
-        message: '商品名称更新成功',
+        message: hasRealtimeUpdate || hasSkuUpdate ? '商品监控配置更新成功' : '商品名称更新成功',
         product
     });
 });
@@ -1289,6 +1587,10 @@ app.get('/api/products/:id/trend', (req, res) => {
 app.delete('/api/products/:id', (req, res) => {
     const productId = parseInt(req.params.id);
 
+    // 删除商品前取消其待执行的实时监控任务。
+    clearRealtimeProductRefreshTimer(productId);
+    productRefreshPromises.delete(productId);
+
     // 删除商品
     products = products.filter(p => p.id !== productId);
 
@@ -1306,14 +1608,15 @@ app.get('/api/settings', (req, res) => {
     // 不返回邮件密码等敏感信息，仅提供设置页需要展示的配置。
     res.json({
         mailRecipients: getMailRecipients(),
-        checkIntervalMinutes: checkIntervalMinutes
+        checkIntervalMinutes: checkIntervalMinutes,
+        realTimeCheckIntervalSeconds: realTimeCheckIntervalSeconds
     });
 });
 
 // 保存设置页提交的收件人和刷新间隔，并立即应用到当前进程。
 app.post('/api/settings', (req, res) => {
     // 读取前端提交的配置字段。
-    const { mailRecipients, checkIntervalMinutes: requestedInterval } = req.body || {};
+    const { mailRecipients, checkIntervalMinutes: requestedInterval, realTimeCheckIntervalSeconds: requestedRealtimeInterval } = req.body || {};
     // 统一解析收件人输入，支持字符串和数组格式。
     const recipients = mailRecipients === undefined ? getMailRecipients() : normalizeMailRecipients(mailRecipients);
     // 校验邮箱格式，避免错误地址进入邮件发送流程。
@@ -1328,19 +1631,30 @@ app.post('/api/settings', (req, res) => {
     if (nextInterval === null) {
         return res.status(400).json({ error: '刷新间隔必须是 1 到 59 之间的整数分钟' });
     }
+    // 校验实时监控间隔，限制在 2 到 60 秒。
+    const nextRealtimeInterval = requestedRealtimeInterval === undefined
+        ? realTimeCheckIntervalSeconds
+        : normalizeRealTimeCheckIntervalSeconds(requestedRealtimeInterval, null);
+    if (nextRealtimeInterval === null) {
+        return res.status(400).json({ error: '实时监控间隔必须是 2 到 60 之间的整数秒' });
+    }
 
     // 更新运行时配置，空数组表示主动关闭补货邮件通知。
     mailRecipientsOverride = recipients;
     checkIntervalMinutes = nextInterval;
+    realTimeCheckIntervalSeconds = nextRealtimeInterval;
     // 持久化配置，服务重启后仍使用设置页保存的值。
     saveData();
     // 重新创建定时任务，让新的刷新间隔立即生效。
     scheduleAutoRefresh();
+    // 设置变更后从当前时刻重新计算所有实时商品的下一次查询时间。
+    scheduleAllRealtimeProductRefreshes();
 
     res.json({
         message: '设置已保存',
         mailRecipients: getMailRecipients(),
-        checkIntervalMinutes: checkIntervalMinutes
+        checkIntervalMinutes: checkIntervalMinutes,
+        realTimeCheckIntervalSeconds: realTimeCheckIntervalSeconds
     });
 });
 
@@ -1374,47 +1688,28 @@ async function autoRefreshAllProducts() {
 
         console.log(`================================`);
         console.log(`开始自动刷新所有商品数据 (${new Date().toLocaleString()})`);
-        console.log(`需要刷新的商品数量: ${products.length}`);
+        const scheduledProducts = products.filter(product => product.realtime_monitoring !== true);
+        console.log(`需要刷新的商品数量: ${scheduledProducts.length}`);
         console.log(`================================`);
 
         let successCount = 0;
         let failCount = 0;
 
-        for (const product of products) {
+        for (const product of scheduledProducts) {
             try {
+                // 商品可能在本轮开始后切换为实时监控，执行前再次确认避免重复刷新。
+                if (product.realtime_monitoring === true) {
+                    console.log(`⏭️ 商品 ${product.name} 已切换为实时监控，跳过全局任务`);
+                    continue;
+                }
                 console.log(`正在刷新商品: ${product.name} (ID: ${product.id})`);
-
-                // 爬取最新数据
-                const productData = await scrapeProductData(product.url);
-
-                // 更新商品基本信息
-                await applyProductData(product, productData);
-
-                // 添加新的销量数据
-                const now = new Date();
-                const today = now.toISOString().split('T')[0];
-
-                // 检查今天是否已有数据
-                const existingTodayData = salesData.find(s =>
-                    s.product_id === product.id && s.crawl_date === today
-                );
-
-                // 如果今天还没有数据，或者距离上次更新超过1小时，则添加新数据
-                if (!existingTodayData ||
-                    (new Date() - new Date(existingTodayData.crawl_time)) > 60 * 60 * 1000) {
-
-                    salesData.push({
-                        product_id: product.id,
-                        product_sales: productData.productSales,
-                        shop_sales: productData.shopSales,
-                        crawl_date: today,
-                        crawl_time: now.toISOString()
-                    });
-
-                    console.log(`✅ 商品 ${product.name} 数据更新成功 - 销量: ${productData.productSales}`);
+                const result = await refreshProductData(product, { source: 'global' });
+                if (result.salesRecorded) {
+                    console.log(`✅ 商品 ${product.name} 数据更新成功`);
                     successCount++;
                 } else {
-                    console.log(`⏭️ 商品 ${product.name} 今天已更新过，跳过`);
+                    console.log(`⏭️ 商品 ${product.name} 今天已更新过，跳过销量历史记录`);
+                    successCount++;
                 }
 
                 // 避免请求过于频繁，每个商品之间间隔2秒
@@ -1454,6 +1749,8 @@ function scheduleAutoRefresh() {
 
 // 启动默认自动刷新任务。
 scheduleAutoRefresh();
+// 恢复重启前已开启的实时监控商品。
+scheduleAllRealtimeProductRefreshes();
 
 // 健康检查端点
 app.get('/health', (req, res) => {
@@ -1463,6 +1760,7 @@ app.get('/health', (req, res) => {
         products: products.length,
         uptime: process.uptime(),
         check_interval_minutes: checkIntervalMinutes,
+        real_time_check_interval_seconds: realTimeCheckIntervalSeconds,
         mail_configured: Boolean(process.env.MAIL_USERNAME && process.env.MAIL_PASSWORD && getMailRecipients().length > 0)
     });
 });
