@@ -393,6 +393,18 @@ async function closeBrowser() {
     }
 }
 
+// 安全关闭单个 Puppeteer 页面，避免 Chromium 已退出时的清理异常覆盖业务错误。
+async function closePageSafely(page, context) {
+    // 页面不存在或已经关闭时无需重复发送关闭命令。
+    if (!page || page.isClosed()) return;
+    try {
+        await page.close();
+    } catch (error) {
+        // 清理失败只记录上下文，真正的抓取错误应由原调用链负责返回。
+        console.warn(`${context}页面关闭失败:`, error.message);
+    }
+}
+
 // 创建邮件传输器；未配置密码时返回空值并跳过邮件发送。
 function getMailTransporter() {
     // 邮件配置全部来自环境变量，避免将密码写入代码或数据文件。
@@ -760,7 +772,7 @@ async function resolveShortUrl(shortUrl) {
         return shortUrl;
     } finally {
         // 只关闭当前页面，浏览器实例继续供其他任务复用。
-        if (page) await page.close();
+        await closePageSafely(page, '短链接解析');
     }
 }
 
@@ -888,21 +900,26 @@ function extractSkuDataFromVariantResponse(payload) {
 async function fetchSkuData(page) {
     // 通过页面真实点击触发 variant 接口，避免猜测接口签名或绕过页面上下文。
     try {
-        const responsePromise = page.waitForResponse(response =>
-            response.request().method() === 'GET' &&
-            response.url().includes('/api/store/jpd/edith/detail/h5/toc/variant'),
-            { timeout: 12000 }
-        );
-        const clicked = await page.evaluate(() => {
-            // “已选”文本是规格弹层在不同页面版本中都保留的稳定入口。
-            const target = Array.from(document.querySelectorAll('body *'))
-                .find(element => (element.textContent || '').trim() === '已选');
-            if (!target) return false;
-            target.click();
-            return true;
-        });
-        if (!clicked) return { options: [], skus: [] };
-        const response = await responsePromise;
+        // 先确认页面存在规格入口，避免创建无人等待的响应 Promise 后直接返回。
+        const hasSkuTrigger = await page.evaluate(() => Array.from(document.querySelectorAll('body *'))
+            .some(element => (element.textContent || '').trim() === '已选'));
+        if (!hasSkuTrigger) return { options: [], skus: [] };
+
+        // 同时注册响应监听和执行点击，确保页面关闭或等待超时都由当前 try/catch 接管。
+        const [response] = await Promise.all([
+            page.waitForResponse(response =>
+                response.request().method() === 'GET' &&
+                response.url().includes('/api/store/jpd/edith/detail/h5/toc/variant'),
+                { timeout: 12000 }
+            ),
+            page.evaluate(() => {
+                // 再次获取目标，兼容预检查后页面节点被前端重新渲染的情况。
+                const target = Array.from(document.querySelectorAll('body *'))
+                    .find(element => (element.textContent || '').trim() === '已选');
+                if (!target) throw new Error('商品规格入口已失效');
+                target.click();
+            })
+        ]);
         const payload = await response.json();
         return extractSkuDataFromVariantResponse(payload);
     } catch (error) {
@@ -1263,7 +1280,7 @@ async function scrapeProductData(url, options = {}) {
         throw error;
     } finally {
         // 只关闭当前页面，浏览器实例继续供其他任务复用。
-        if (page) await page.close();
+        await closePageSafely(page, '商品抓取');
     }
 }
 
