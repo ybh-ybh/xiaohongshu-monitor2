@@ -16,6 +16,8 @@ const nodemailer = require('nodemailer');
 
 // 启动时加载项目根目录的 .env，支持本地 npm start 使用邮件配置。
 require('dotenv').config();
+// 使用统一结构化日志输出，便于容器采集、筛选和关联请求。
+const { logger, runWithLogContext, activeLogFormat, activeLogLevel } = require('./logger');
 
 const app = express();
 // 读取登录用户名，生产环境必须通过环境变量设置。
@@ -40,7 +42,10 @@ const AUTH_FAILURE_WINDOW_MS = 15 * 60 * 1000;
 const AUTH_MAX_FAILURES = 10;
 // 未配置凭据时直接拒绝启动，确保公网部署不会意外开放。
 if (!AUTH_USERNAME || !AUTH_PASSWORD) {
-    console.error('缺少 AUTH_USERNAME 或 AUTH_PASSWORD，服务拒绝启动。请先配置登录凭据。');
+    logger.fatal('config.auth_missing', '缺少登录凭据，服务拒绝启动', {
+        auth_username_configured: Boolean(AUTH_USERNAME),
+        auth_password_configured: Boolean(AUTH_PASSWORD)
+    });
     process.exit(1);
 }
 // 读取服务端口配置，未配置时使用 3001。
@@ -73,6 +78,8 @@ let mailTransporter = null;
 let browserInstance = null;
 // 保存正在进行的浏览器启动 Promise，避免并发重复启动。
 let browserLaunchPromise = null;
+// 标记浏览器是否由服务主动关闭，用于区分正常退出和异常断连。
+let browserClosing = false;
 
 // 清理上一次 Chromium 异常退出或跨主机复制留下的 profile 锁文件。
 function clearStaleBrowserProfileLocks() {
@@ -93,7 +100,7 @@ function clearStaleBrowserProfileLocks() {
     } catch (error) {
         // 没有锁文件时无需处理；其他读取异常交给 Chromium 返回明确错误。
         if (error.code !== 'ENOENT') {
-            console.warn('检查 Chromium profile 锁文件失败:', error.message);
+            logger.warn('browser.profile_lock_check_failed', '检查 Chromium profile 锁文件失败', { error });
         }
         return false;
     }
@@ -134,17 +141,66 @@ function clearStaleBrowserProfileLocks() {
         } catch (error) {
             // 某个锁文件不存在或已被 Chromium 自己清理时继续处理其他文件。
             if (error.code !== 'ENOENT') {
-                console.warn(`清理 Chromium 锁文件 ${lockFileName} 失败:`, error.message);
+                logger.warn('browser.profile_lock_remove_failed', '清理 Chromium profile 锁文件失败', {
+                    lock_file: lockFileName,
+                    error
+                });
             }
         }
     }
     if (removed) {
-        console.warn(`已清理遗留的 Chromium profile 锁（来源: ${lockTarget}）。`);
+        logger.warn('browser.stale_profile_lock_removed', '已清理遗留的 Chromium profile 锁', {
+            lock_target: lockTarget
+        });
     }
     return removed;
 }
 
-// 中间件
+// 记录 API 请求完成情况，健康检查默认静默以降低容器日志噪声。
+app.use((req, res, next) => {
+    // 读取请求日志总开关，默认开启。
+    const requestLoggingEnabled = envBoolean('LOG_REQUESTS', true);
+    // 读取健康检查日志开关，默认关闭。
+    const healthLoggingEnabled = envBoolean('LOG_HEALTH_CHECKS', false);
+    // 仅跟踪 API 与按需启用的健康检查，不记录静态资源轮询。
+    const shouldTrackRequest = requestLoggingEnabled && (req.path.startsWith('/api/') || (healthLoggingEnabled && req.path === '/health'));
+    if (!shouldTrackRequest) return next();
+
+    // 优先复用网关传入的安全请求编号，否则生成新的 UUID。
+    const incomingRequestId = String(req.get('x-request-id') || '');
+    // 限制请求编号字符和长度，避免把任意请求头原样写入日志。
+    const requestId = /^[A-Za-z0-9._:-]{1,100}$/.test(incomingRequestId) ? incomingRequestId : crypto.randomUUID();
+    // 记录请求耗时起点。
+    const startedAt = process.hrtime.bigint();
+    // 向客户端返回关联编号，便于前后端共同排查。
+    res.setHeader('x-request-id', requestId);
+
+    return runWithLogContext({ request_id: requestId }, () => {
+        res.once('finish', () => {
+            // 计算请求总耗时，保留到毫秒整数即可。
+            const durationMs = Number((process.hrtime.bigint() - startedAt) / BigInt(1_000_000));
+            // 构造不包含查询参数和请求体的安全请求摘要。
+            const fields = {
+                method: req.method,
+                path: req.path,
+                status_code: res.statusCode,
+                duration_ms: durationMs
+            };
+            if (res.statusCode >= 500) {
+                logger.error('http.request_completed', 'API 请求失败', fields);
+            } else if (res.statusCode >= 400) {
+                logger.warn('http.request_completed', 'API 请求被拒绝', fields);
+            } else if (req.method === 'GET') {
+                logger.debug('http.request_completed', 'API 请求完成', fields);
+            } else {
+                logger.info('http.request_completed', 'API 请求完成', fields);
+            }
+        });
+        return next();
+    });
+});
+
+// 在请求日志上下文建立后解析 JSON，确保格式错误也能记录 requestId 和状态码。
 app.use(express.json());
 
 // 使用常量时间比较敏感字符串，减少密码比对的时序侧信道。
@@ -288,7 +344,7 @@ const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 // 确保数据目录存在
 if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR);
-    console.log('创建数据目录:', DATA_DIR);
+    logger.info('storage.data_directory_created', '已创建数据目录', { data_directory: DATA_DIR });
 }
 // 创建浏览器登录态目录。
 if (!fs.existsSync(USER_DATA_DIR)) {
@@ -309,6 +365,10 @@ let refreshTask = null;
 const realtimeRefreshTimers = new Map();
 // 保存每个商品正在执行的刷新 promise，避免同一商品重复查询。
 const productRefreshPromises = new Map();
+// 保存 SKU 读取告警的最近输出时间，避免实时监控失败时每几秒重复刷屏。
+const skuWarningLastLoggedAt = new Map();
+// 同一商品 SKU 读取告警的最短输出间隔。
+const SKU_WARNING_INTERVAL_MS = 5 * 60 * 1000;
 
 // 将刷新间隔转换为受支持的分钟数。
 function normalizeCheckIntervalMinutes(value, fallback = DEFAULT_CHECK_INTERVAL_MINUTES) {
@@ -347,13 +407,32 @@ function envBoolean(name, defaultValue) {
     return ['1', 'true', 'yes', 'y', 'on'].includes(String(value).toLowerCase());
 }
 
+// 生成适合日志展示的 URL，移除可能包含追踪参数或临时凭据的查询字符串。
+function getSafeUrlForLog(value) {
+    try {
+        // 仅保留协议、主机与路径，避免把 query/hash 写入容器日志。
+        const parsedUrl = new URL(String(value));
+        return `${parsedUrl.origin}${parsedUrl.pathname}`;
+    } catch (error) {
+        // 非标准 URL 不输出原文，只保留长度，避免分享文本中的无关内容进入日志。
+        return `[unparseable-url:length=${String(value || '').length}]`;
+    }
+}
+
 // 创建带持久化登录态的 Puppeteer 浏览器实例。
 async function launchBrowser() {
     // 使用统一的浏览器配置，保证短链接解析和商品抓取共享登录状态。
     if (browserInstance) return browserInstance;
     if (browserLaunchPromise) return browserLaunchPromise;
+    browserClosing = false;
     // 启动前清理可确认已经失效的 Chromium profile 锁，兼容容器迁移和异常退出。
     clearStaleBrowserProfileLocks();
+    // 记录浏览器启动耗时起点。
+    const startedAt = Date.now();
+    logger.info('browser.launch_started', '正在启动共享 Chromium 实例', {
+        headless: HEADLESS,
+        profile_directory: USER_DATA_DIR
+    });
     // 保存启动 Promise，令同一时刻的多个请求共享一次 Chromium 启动过程。
     browserLaunchPromise = puppeteer.launch({
         headless: HEADLESS ? 'new' : false,
@@ -372,11 +451,28 @@ async function launchBrowser() {
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH || undefined
     }).then(browser => {
         browserInstance = browser;
+        logger.info('browser.launch_completed', '共享 Chromium 实例已启动', {
+            duration_ms: Date.now() - startedAt,
+            browser_pid: browser.process()?.pid
+        });
         browser.on('disconnected', () => {
             // 浏览器异常断开时清理缓存，下一次任务可以重新启动。
+            const expectedDisconnect = browserClosing;
             browserInstance = null;
+            browserClosing = false;
+            if (expectedDisconnect) {
+                logger.debug('browser.disconnected', '共享 Chromium 实例已正常断开');
+            } else {
+                logger.warn('browser.disconnected', '共享 Chromium 实例意外断开');
+            }
         });
         return browser;
+    }).catch(error => {
+        logger.error('browser.launch_failed', '共享 Chromium 实例启动失败', {
+            duration_ms: Date.now() - startedAt,
+            error
+        });
+        throw error;
     }).finally(() => {
         // 启动完成后释放并发启动锁。
         browserLaunchPromise = null;
@@ -388,8 +484,15 @@ async function launchBrowser() {
 async function closeBrowser() {
     // 只在浏览器确实启动过时执行关闭。
     if (browserInstance) {
-        await browserInstance.close();
-        browserInstance = null;
+        logger.info('browser.close_started', '正在关闭共享 Chromium 实例');
+        browserClosing = true;
+        try {
+            await browserInstance.close();
+            browserInstance = null;
+            logger.info('browser.close_completed', '共享 Chromium 实例已关闭');
+        } finally {
+            browserClosing = false;
+        }
     }
 }
 
@@ -401,7 +504,7 @@ async function closePageSafely(page, context) {
         await page.close();
     } catch (error) {
         // 清理失败只记录上下文，真正的抓取错误应由原调用链负责返回。
-        console.warn(`${context}页面关闭失败:`, error.message);
+        logger.warn('browser.page_close_failed', '浏览器页面关闭失败', { context, error });
     }
 }
 
@@ -439,7 +542,11 @@ async function sendRestockEmail(product, productData) {
     // 获取本次邮件的全部收件人。
     const recipients = getMailRecipients();
     if (!transporter || recipients.length === 0) {
-        console.warn('未配置完整邮件参数，跳过补货邮件通知。');
+        logger.warn('mail.restock_skipped', '邮件配置不完整，跳过补货通知', {
+            product_id: product.id,
+            transporter_configured: Boolean(transporter),
+            recipient_count: recipients.length
+        });
         return false;
     }
     // 发送包含商品名称、价格、库存状态、指定 SKU 和直达链接的邮件。
@@ -459,7 +566,11 @@ async function sendRestockEmail(product, productData) {
             `链接：${product.url}`
         ].join('\n')
     });
-    console.log(`补货邮件已发送: ${product.url}`);
+    logger.info('mail.restock_sent', '补货通知邮件已发送', {
+        product_id: product.id,
+        product_name: productData.name || product.name,
+        recipient_count: recipients.length
+    });
     return true;
 }
 
@@ -484,7 +595,11 @@ async function applyProductData(product, productData) {
             }
         } catch (error) {
             // 邮件失败只记录错误，不能让后续商品停止监控。
-            console.error(`补货邮件发送失败: ${error.message}`);
+            logger.error('mail.restock_failed', '补货通知邮件发送失败', {
+                product_id: product.id,
+                product_name: productData.name || product.name,
+                error
+            });
         }
     }
     return restocked;
@@ -502,14 +617,12 @@ function loadData() {
                 ...product,
                 realtime_monitoring: product.realtime_monitoring === true
             }));
-            console.log(`加载了 ${products.length} 个商品数据`);
         }
 
         // 加载销量数据
         if (fs.existsSync(SALES_DATA_FILE)) {
             const salesJson = fs.readFileSync(SALES_DATA_FILE, 'utf8');
             salesData = JSON.parse(salesJson);
-            console.log(`加载了 ${salesData.length} 条销量数据`);
         }
 
         // 加载配置数据
@@ -529,18 +642,22 @@ function loadData() {
             if (Object.prototype.hasOwnProperty.call(config, 'real_time_check_interval_seconds')) {
                 realTimeCheckIntervalSeconds = normalizeRealTimeCheckIntervalSeconds(config.real_time_check_interval_seconds);
             }
-            console.log(`下一个ID: ${nextId}`);
         }
 
         // 如果有商品但nextId为1，重新计算nextId
         if (products.length > 0 && nextId === 1) {
             nextId = Math.max(...products.map(p => p.id)) + 1;
-            console.log(`重新计算nextId: ${nextId}`);
         }
-
+        logger.info('storage.data_loaded', '监控数据加载完成', {
+            product_count: products.length,
+            sales_record_count: salesData.length,
+            next_product_id: nextId,
+            realtime_product_count: products.filter(product => product.realtime_monitoring === true).length,
+            check_interval_minutes: checkIntervalMinutes,
+            realtime_check_interval_seconds: realTimeCheckIntervalSeconds
+        });
     } catch (error) {
-        console.error('加载数据失败:', error);
-        console.log('将使用空数据开始');
+        logger.error('storage.data_load_failed', '监控数据加载失败，将使用当前内存状态继续启动', { error });
     }
 }
 
@@ -562,9 +679,12 @@ function saveData() {
         };
         fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
 
-        console.log('数据保存成功');
+        logger.debug('storage.data_saved', '监控数据已保存', {
+            product_count: products.length,
+            sales_record_count: salesData.length
+        });
     } catch (error) {
-        console.error('保存数据失败:', error);
+        logger.error('storage.data_save_failed', '监控数据保存失败', { error });
     }
 }
 
@@ -582,17 +702,16 @@ function scheduleRealtimeProductRefresh(product) {
     clearRealtimeProductRefreshTimer(product.id);
     if (product.realtime_monitoring !== true) return;
     // 从本次查询完成时开始计算实时监控间隔。
-    const timer = setTimeout(async () => {
+    const timer = setTimeout(() => runWithLogContext({}, async () => {
         realtimeRefreshTimers.delete(product.id);
         const currentProduct = products.find(item => item.id === product.id);
         if (!currentProduct || currentProduct.realtime_monitoring !== true) return;
         try {
             await refreshProductData(currentProduct, { source: 'realtime' });
         } catch (error) {
-            // 查询失败后由 refreshProductData 的 finally 继续安排下一次查询。
-            console.error(`实时监控商品 ${currentProduct.name} 刷新失败:`, error.message);
+            // 查询失败已由 refreshProductData 统一记录，finally 会继续安排下一次查询。
         }
-    }, realTimeCheckIntervalSeconds * 1000);
+    }), realTimeCheckIntervalSeconds * 1000);
     realtimeRefreshTimers.set(product.id, timer);
 }
 
@@ -600,48 +719,116 @@ function scheduleRealtimeProductRefresh(product) {
 function refreshProductData(product, options = {}) {
     // 已有查询时复用同一个 promise，避免不同来源重复访问小红书。
     const existingPromise = productRefreshPromises.get(product.id);
-    if (existingPromise) return existingPromise;
+    if (existingPromise) {
+        logger.debug('monitor.product_refresh_reused', '复用正在执行的商品刷新任务', {
+            product_id: product.id,
+            source: options.source || 'manual'
+        });
+        return existingPromise;
+    }
 
     // 记录调用来源和手动刷新是否需要覆盖当天销量记录。
     const source = options.source || 'manual';
     const replaceToday = options.replaceToday === true;
+    // 为本次商品刷新生成关联编号。
+    const refreshId = crypto.randomUUID();
+    // 记录刷新开始时间，用于输出耗时。
+    const refreshStartedAt = Date.now();
+    // 保存刷新前库存状态，用于识别真正的状态变化。
+    const previousStockStatus = product.stockStatus || 'UNKNOWN';
+    logger.debug('monitor.product_refresh_started', '开始刷新商品数据', {
+        refresh_id: refreshId,
+        batch_id: options.batchId,
+        product_id: product.id,
+        product_name: product.name,
+        source
+    });
     const refreshPromise = (async () => {
-        // 实时监控和指定 SKU 商品都需要读取规格组合。
-        const productData = await scrapeProductData(product.url, {
-            includeSkus: Array.isArray(product.monitored_skus) && product.monitored_skus.length > 0,
-            monitoredSkuIds: product.monitored_skus || []
-        });
-        // 更新商品库存、名称和最后查询时间。
-        await applyProductData(product, productData);
+        try {
+            // 实时监控和指定 SKU 商品都需要读取规格组合。
+            const productData = await scrapeProductData(product.url, {
+                includeSkus: Array.isArray(product.monitored_skus) && product.monitored_skus.length > 0,
+                monitoredSkuIds: product.monitored_skus || [],
+                refreshId,
+                productId: product.id
+            });
+            // 更新商品库存、名称和最后查询时间。
+            const restocked = await applyProductData(product, productData);
 
-        // 记录销量数据；实时查询最多每小时追加一条历史记录。
-        const now = new Date();
-        const today = now.toISOString().split('T')[0];
-        const existingTodayData = salesData.find(item => item.product_id === product.id && item.crawl_date === today);
-        let salesRecorded = false;
-        if (replaceToday) {
-            salesData = salesData.filter(item => !(item.product_id === product.id && item.crawl_date === today));
-            salesData.push({
+            // 记录销量数据；实时查询最多每小时追加一条历史记录。
+            const now = new Date();
+            const today = now.toISOString().split('T')[0];
+            const existingTodayData = salesData.find(item => item.product_id === product.id && item.crawl_date === today);
+            let salesRecorded = false;
+            if (replaceToday) {
+                salesData = salesData.filter(item => !(item.product_id === product.id && item.crawl_date === today));
+                salesData.push({
+                    product_id: product.id,
+                    product_sales: productData.productSales,
+                    shop_sales: productData.shopSales,
+                    crawl_date: today,
+                    crawl_time: now.toISOString()
+                });
+                salesRecorded = true;
+            } else if (!existingTodayData || (now - new Date(existingTodayData.crawl_time)) > 60 * 60 * 1000) {
+                salesData.push({
+                    product_id: product.id,
+                    product_sales: productData.productSales,
+                    shop_sales: productData.shopSales,
+                    crawl_date: today,
+                    crawl_time: now.toISOString()
+                });
+                salesRecorded = true;
+            }
+            // 持久化商品、销量和配置数据。
+            saveData();
+            if (previousStockStatus !== productData.stockStatus) {
+                logger.info('monitor.stock_status_changed', '商品库存状态发生变化', {
+                    refresh_id: refreshId,
+                    batch_id: options.batchId,
+                    product_id: product.id,
+                    product_name: product.name,
+                    source,
+                    previous_stock_status: previousStockStatus,
+                    stock_status: productData.stockStatus,
+                    stock_reason: productData.stockReason,
+                    restocked
+                });
+            }
+            // 组合商品刷新完成日志的公共字段。
+            const completionFields = {
+                refresh_id: refreshId,
+                batch_id: options.batchId,
                 product_id: product.id,
+                product_name: product.name,
+                source,
+                duration_ms: Date.now() - refreshStartedAt,
+                stock_status: productData.stockStatus,
                 product_sales: productData.productSales,
-                shop_sales: productData.shopSales,
-                crawl_date: today,
-                crawl_time: now.toISOString()
-            });
-            salesRecorded = true;
-        } else if (!existingTodayData || (now - new Date(existingTodayData.crawl_time)) > 60 * 60 * 1000) {
-            salesData.push({
+                sales_recorded: salesRecorded
+            };
+            // 实时监控每轮输出一条 info 心跳，便于直接确认高频轮询服务仍在运行。
+            if (source === 'realtime') {
+                logger.info('monitor.realtime_poll_completed', '实时监控轮询完成', completionFields);
+            } else if (source === 'manual') {
+                logger.info('monitor.product_refresh_completed', '商品刷新完成', completionFields);
+            } else {
+                // 全局批量任务已有批次汇总，单商品完成细节保持 debug 以避免重复刷屏。
+                logger.debug('monitor.product_refresh_completed', '商品刷新完成', completionFields);
+            }
+            return { productData, salesRecorded, source };
+        } catch (error) {
+            logger.error('monitor.product_refresh_failed', '商品刷新失败', {
+                refresh_id: refreshId,
+                batch_id: options.batchId,
                 product_id: product.id,
-                product_sales: productData.productSales,
-                shop_sales: productData.shopSales,
-                crawl_date: today,
-                crawl_time: now.toISOString()
+                product_name: product.name,
+                source,
+                duration_ms: Date.now() - refreshStartedAt,
+                error
             });
-            salesRecorded = true;
+            throw error;
         }
-        // 持久化商品、销量和配置数据。
-        saveData();
-        return { productData, salesRecorded, source };
     })();
 
     // 无论成功还是失败，都从完成时刻开始安排下一次实时查询。
@@ -671,7 +858,9 @@ loadData();
 
 // 使用浏览器解析短链接
 async function resolveShortUrl(shortUrl) {
-    console.log('开始解析短链接:', shortUrl);
+    // 记录短链接解析耗时起点。
+    const startedAt = Date.now();
+    logger.debug('link.resolve_started', '开始解析小红书短链接', { url: getSafeUrlForLog(shortUrl) });
 
     // 使用统一浏览器实例以复用小红书登录态。
     const browser = await launchBrowser();
@@ -703,36 +892,32 @@ async function resolveShortUrl(shortUrl) {
             });
         });
 
-        console.log('正在访问短链接...');
-
         // 尝试多种方式访问短链接
         let finalUrl = shortUrl;
 
         try {
             // 方法1: 等待网络空闲
-            console.log('尝试方法1: 等待网络空闲...');
+            logger.debug('link.resolve_attempt', '尝试解析短链接', { strategy: 'networkidle2' });
             await page.goto(shortUrl, {
                 waitUntil: 'networkidle2',
                 timeout: 12000
             });
             finalUrl = page.url();
-            console.log('方法1成功，获取到URL:', finalUrl);
         } catch (error) {
-            console.log('方法1失败，尝试方法2...');
+            logger.debug('link.resolve_attempt_failed', '短链接解析策略失败', { strategy: 'networkidle2', error });
             try {
                 // 方法2: 等待加载完成
-                console.log('尝试方法2: 等待加载完成...');
+                logger.debug('link.resolve_attempt', '尝试解析短链接', { strategy: 'load' });
                 await page.goto(shortUrl, {
                     waitUntil: 'load',
                     timeout: 10000
                 });
                 finalUrl = page.url();
-                console.log('方法2成功，获取到URL:', finalUrl);
             } catch (error2) {
-                console.log('方法2失败，尝试方法3...');
+                logger.debug('link.resolve_attempt_failed', '短链接解析策略失败', { strategy: 'load', error: error2 });
                 try {
                     // 方法3: 不等待，直接获取重定向
-                    console.log('尝试方法3: 快速访问...');
+                    logger.debug('link.resolve_attempt', '尝试解析短链接', { strategy: 'domcontentloaded' });
                     await page.goto(shortUrl, {
                         waitUntil: 'domcontentloaded',
                         timeout: 8000
@@ -740,18 +925,16 @@ async function resolveShortUrl(shortUrl) {
                     // 等待一下让重定向完成
                     await page.waitForTimeout(3001);
                     finalUrl = page.url();
-                    console.log('方法3成功，获取到URL:', finalUrl);
                 } catch (error3) {
-                    console.log('方法3失败，尝试方法4...');
+                    logger.debug('link.resolve_attempt_failed', '短链接解析策略失败', { strategy: 'domcontentloaded', error: error3 });
                     try {
                         // 方法4: 最简单的访问方式
-                        console.log('尝试方法4: 最简单访问...');
+                        logger.debug('link.resolve_attempt', '尝试解析短链接', { strategy: 'default' });
                         await page.goto(shortUrl, { timeout: 6000 });
                         await page.waitForTimeout(2000);
                         finalUrl = page.url();
-                        console.log('方法4成功，获取到URL:', finalUrl);
                     } catch (error4) {
-                        console.log('所有方法都失败，使用原链接');
+                        logger.debug('link.resolve_attempt_failed', '短链接解析策略失败', { strategy: 'default', error: error4 });
                         finalUrl = shortUrl;
                     }
                 }
@@ -759,15 +942,26 @@ async function resolveShortUrl(shortUrl) {
         }
 
         if (finalUrl !== shortUrl) {
-            console.log('短链接解析成功:', shortUrl, '->', finalUrl);
+            logger.info('link.resolve_completed', '小红书短链接解析成功', {
+                source_url: getSafeUrlForLog(shortUrl),
+                resolved_url: getSafeUrlForLog(finalUrl),
+                duration_ms: Date.now() - startedAt
+            });
         } else {
-            console.log('短链接解析失败，使用原链接');
+            logger.warn('link.resolve_fallback', '小红书短链接解析失败，继续使用原链接', {
+                url: getSafeUrlForLog(shortUrl),
+                duration_ms: Date.now() - startedAt
+            });
         }
 
         return finalUrl;
 
     } catch (error) {
-        console.error('短链接解析过程出错:', error);
+        logger.error('link.resolve_failed', '小红书短链接解析过程出错', {
+            url: getSafeUrlForLog(shortUrl),
+            duration_ms: Date.now() - startedAt,
+            error
+        });
         // 解析失败时返回原URL
         return shortUrl;
     } finally {
@@ -778,8 +972,6 @@ async function resolveShortUrl(shortUrl) {
 
 // 提取和处理小红书链接
 async function processXhsUrl(inputText) {
-    console.log('处理输入文本:', inputText);
-
     // 支持的链接格式
     const urlPatterns = [
         // 完整的小红书商品链接
@@ -805,7 +997,7 @@ async function processXhsUrl(inputText) {
 
     // 如果是短链接，尝试转换为长链接
     if (extractedUrl.includes('xhslink.com')) {
-        console.log('检测到短链接，正在转换...');
+        logger.debug('link.short_link_detected', '检测到小红书短链接');
         extractedUrl = await resolveShortUrl(extractedUrl);
     }
 
@@ -818,7 +1010,9 @@ async function processXhsUrl(inputText) {
         }
     }
 
-    console.log('最终处理的链接:', extractedUrl);
+    logger.debug('link.validation_completed', '小红书商品链接校验完成', {
+        url: getSafeUrlForLog(extractedUrl)
+    });
     return extractedUrl;
 }
 
@@ -897,7 +1091,7 @@ function extractSkuDataFromVariantResponse(payload) {
 }
 
 // 打开商品规格弹层并读取小红书返回的完整 SKU 组合。
-async function fetchSkuData(page) {
+async function fetchSkuData(page, context = {}) {
     // 通过页面真实点击触发 variant 接口，避免猜测接口签名或绕过页面上下文。
     try {
         // 先确认页面存在规格入口，避免创建无人等待的响应 Promise 后直接返回。
@@ -924,7 +1118,24 @@ async function fetchSkuData(page) {
         return extractSkuDataFromVariantResponse(payload);
     } catch (error) {
         // 规格弹层不可用时保留空结果，商品级监控仍按原有逻辑运行。
-        console.warn('读取商品 SKU 数据失败:', error.message);
+        // 使用商品编号或预览场景作为告警限频键。
+        const warningKey = context.productId === undefined ? 'preview' : String(context.productId);
+        // 读取上次告警时间，五分钟内重复失败仅在 debug 中展示。
+        const lastLoggedAt = skuWarningLastLoggedAt.get(warningKey) || 0;
+        // 记录本次失败时间。
+        const now = Date.now();
+        // 组合 SKU 读取失败的诊断字段。
+        const fields = {
+            refresh_id: context.refreshId,
+            product_id: context.productId,
+            error
+        };
+        if (now - lastLoggedAt >= SKU_WARNING_INTERVAL_MS) {
+            skuWarningLastLoggedAt.set(warningKey, now);
+            logger.warn('scrape.sku_read_failed', '读取商品 SKU 数据失败，降级为商品级监控', fields);
+        } else {
+            logger.debug('scrape.sku_read_failed_suppressed', '重复的商品 SKU 读取告警已限频', fields);
+        }
         return { options: [], skus: [] };
     }
 }
@@ -950,7 +1161,14 @@ function applyMonitoredSkuStatus(productData, monitoredSkuIds) {
 
 // 爬取商品数据
 async function scrapeProductData(url, options = {}) {
-    console.log('开始爬取商品数据:', url);
+    // 记录单次页面抓取耗时起点。
+    const startedAt = Date.now();
+    logger.debug('scrape.started', '开始抓取商品页面', {
+        refresh_id: options.refreshId,
+        product_id: options.productId,
+        url: getSafeUrlForLog(url),
+        include_skus: options.includeSkus === true
+    });
 
     // 使用统一浏览器实例以复用小红书登录态。
     const browser = await launchBrowser();
@@ -962,28 +1180,30 @@ async function scrapeProductData(url, options = {}) {
         // 设置用户代理
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
 
-        console.log('正在访问页面...');
         try {
             await page.goto(url, { waitUntil: 'networkidle2', timeout: 15000 });
-            console.log('页面加载完成');
         } catch (error) {
-            console.log('页面加载超时，尝试继续...');
+            logger.debug('scrape.navigation_timeout', '商品页面加载未在期限内完成，继续尝试提取', {
+                refresh_id: options.refreshId,
+                product_id: options.productId,
+                error
+            });
         }
 
         // 等待页面加载
-        console.log('等待页面渲染...');
         await page.waitForTimeout(5000);
 
-        console.log('正在提取数据...');
-
-        // 先截图保存，方便调试
-        await page.screenshot({ path: 'debug_screenshot.png', fullPage: true });
-        console.log('页面截图已保存为 debug_screenshot.png');
+        // 仅在显式开启诊断开关时截图，避免实时监控持续产生无意义磁盘 IO。
+        if (envBoolean('SCRAPE_DEBUG_SCREENSHOT', false)) {
+            await page.screenshot({ path: 'debug_screenshot.png', fullPage: true });
+            logger.debug('scrape.debug_screenshot_saved', '商品页面诊断截图已保存', {
+                path: path.join(__dirname, 'debug_screenshot.png')
+            });
+        }
 
         const data = await page.evaluate(() => {
-            // 获取页面所有文本内容用于调试
+            // 获取页面所有文本内容用于解析。
             const pageText = document.body.innerText;
-            console.log('页面文本内容:', pageText.substring(0, 500));
 
             // 尝试多种选择器来获取商品信息
             const getTextBySelectors = (selectors, description) => {
@@ -993,13 +1213,11 @@ async function scrapeProductData(url, options = {}) {
                         for (const element of elements) {
                             const text = element.textContent.trim();
                             if (text) {
-                                console.log(`${description} - 找到 ${selector}: ${text}`);
                                 return text;
                             }
                         }
                     }
                 }
-                console.log(`${description} - 未找到匹配的元素`);
                 return '';
             };
 
@@ -1076,9 +1294,6 @@ async function scrapeProductData(url, options = {}) {
             let extractedShopName = '未知店铺';
             let extractedShopSales = '0';
 
-            // 从页面文本中直接查找商品名称
-            console.log('页面文本前500字符:', pageText.substring(0, 500));
-
             // 改进的商品名称提取逻辑
             const namePatterns = [
                 // 针对果壳铃商品的特殊格式：【云水】三果33颗果壳摇铃 么几果壳铃 · 草绳33颗
@@ -1136,7 +1351,6 @@ async function scrapeProductData(url, options = {}) {
                             candidateName.length > 5 &&
                             candidateName.length < 200) {
                             extractedName = candidateName;
-                            console.log('使用备用模式提取到商品名称:', extractedName);
                             break;
                         }
                     }
@@ -1158,7 +1372,6 @@ async function scrapeProductData(url, options = {}) {
                         candidateName.length > 8 &&
                         candidateName.length < 150) {
                         extractedName = candidateName;
-                        console.log('从文本中提取到商品名称:', extractedName);
                         break;
                     }
                 }
@@ -1168,21 +1381,18 @@ async function scrapeProductData(url, options = {}) {
             const priceMatch = pageText.match(/¥\s*(\d+(?:\.\d+)?)/);
             if (priceMatch) {
                 extractedPrice = parseFloat(priceMatch[1]);
-                console.log('从文本中提取到价格:', extractedPrice);
             }
 
             // 提取商品销量（寻找"已售"后的数字）
             const salesMatch = pageText.match(/已售\s*(\d+(?:\.\d+)?[万千]?)/);
             if (salesMatch) {
                 extractedSales = salesMatch[1];
-                console.log('从文本中提取到商品销量:', extractedSales);
             }
 
             // 提取店铺名称（寻找店铺名称模式）
             const shopMatch = pageText.match(/([^¥\n]{3,20}?)(?:的店|店铺)/);
             if (shopMatch) {
                 extractedShopName = shopMatch[1].trim();
-                console.log('从文本中提取到店铺名称:', extractedShopName);
             }
 
             // 提取店铺销量（寻找店铺相关的已售数字）
@@ -1192,7 +1402,6 @@ async function scrapeProductData(url, options = {}) {
                 const shopSalesMatch = shopSalesMatches[1].match(/(\d+(?:\.\d+)?[万千]?)/);
                 if (shopSalesMatch) {
                     extractedShopSales = shopSalesMatch[1];
-                    console.log('从文本中提取到店铺销量:', extractedShopSales);
                 }
             }
 
@@ -1219,16 +1428,6 @@ async function scrapeProductData(url, options = {}) {
             // 未找到明确依据时保持 UNKNOWN，只有明确可购买时才进入有货状态。
             const stockStatus = outOfStockReason ? 'OUT_OF_STOCK' : (inStockReason ? 'IN_STOCK' : 'UNKNOWN');
 
-            console.log('最终提取结果:', {
-                name: finalName,
-                price: finalPrice,
-                sales: finalSales,
-                shopName: finalShopName,
-                shopSales: finalShopSales,
-                stockStatus,
-                stockReason: outOfStockReason || inStockReason || '未找到明确库存依据'
-            });
-
             return {
                 name: finalName,
                 price: finalPrice,
@@ -1253,10 +1452,10 @@ async function scrapeProductData(url, options = {}) {
             };
         });
 
-        console.log('提取到的原始数据:', data);
-
         // 预览、新增指定 SKU 或已有指定 SKU 刷新时读取规格组合。
-        const skuData = options.includeSkus ? await fetchSkuData(page) : { options: [], skus: [] };
+        const skuData = options.includeSkus
+            ? await fetchSkuData(page, { productId: options.productId, refreshId: options.refreshId })
+            : { options: [], skus: [] };
 
         const result = {
             name: data.debug.extractedInfo.name || data.name,
@@ -1272,12 +1471,19 @@ async function scrapeProductData(url, options = {}) {
 
         // 指定 SKU 时，以选中组合的库存结果覆盖商品级文案。
         applyMonitoredSkuStatus(result, options.monitoredSkuIds);
-        console.log('处理后的数据:', result);
+        logger.debug('scrape.completed', '商品页面抓取完成', {
+            refresh_id: options.refreshId,
+            product_id: options.productId,
+            duration_ms: Date.now() - startedAt,
+            product_name: result.name,
+            price: result.price,
+            product_sales: result.productSales,
+            shop_sales: result.shopSales,
+            stock_status: result.stockStatus,
+            stock_reason: result.stockReason,
+            sku_count: result.skus.length
+        });
         return result;
-
-    } catch (error) {
-        console.error('爬取数据失败:', error);
-        throw error;
     } finally {
         // 只关闭当前页面，浏览器实例继续供其他任务复用。
         await closePageSafely(page, '商品抓取');
@@ -1296,7 +1502,10 @@ app.post('/api/products/preview', async (req, res) => {
         return res.json({ url: processedUrl, product: productData });
     } catch (error) {
         // 预览失败不改动已有商品数据。
-        console.error('预览商品失败:', error);
+        logger.error('product.preview_failed', '预览商品失败', {
+            url: getSafeUrlForLog(url),
+            error
+        });
         return res.status(500).json({ error: '获取商品 SKU 失败: ' + error.message });
     }
 });
@@ -1316,7 +1525,7 @@ app.post('/api/products', async (req, res) => {
     }
 
     try {
-        console.log('收到添加商品请求:', url);
+        logger.debug('product.create_started', '开始添加商品', { url: getSafeUrlForLog(url) });
 
         // 处理和提取小红书链接
         const processedUrl = await processXhsUrl(url);
@@ -1368,14 +1577,23 @@ app.post('/api/products', async (req, res) => {
         // 新商品首次查询已完成，从此刻开始计算下一次实时查询。
         scheduleRealtimeProductRefresh(product);
 
-        console.log('商品添加成功:', product);
+        logger.info('product.created', '商品添加成功', {
+            product_id: product.id,
+            product_name: product.name,
+            stock_status: product.stockStatus,
+            monitored_sku_count: product.monitored_skus.length,
+            realtime_monitoring: product.realtime_monitoring
+        });
         res.json({
             message: '商品添加成功',
             product
         });
 
     } catch (error) {
-        console.error('添加商品失败:', error);
+        logger.error('product.create_failed', '添加商品失败', {
+            url: getSafeUrlForLog(url),
+            error
+        });
         res.status(500).json({ error: '添加商品失败: ' + error.message });
     }
 });
@@ -1424,7 +1642,7 @@ app.get('/api/products', (req, res) => {
 
         res.json(result);
     } catch (error) {
-        console.error('获取商品数据失败:', error);
+        logger.error('product.list_failed', '获取商品列表失败', { error });
         res.status(500).json({ error: '获取数据失败' });
     }
 });
@@ -1439,12 +1657,10 @@ app.post('/api/products/:id/refresh', async (req, res) => {
     }
 
     try {
-        console.log('刷新商品数据:', product.url);
         const result = await refreshProductData(product, { source: 'manual', replaceToday: true });
         res.json({ message: '数据刷新成功', data: result.productData });
 
     } catch (error) {
-        console.error('刷新数据失败:', error);
         res.status(500).json({ error: '刷新数据失败: ' + error.message });
     }
 });
@@ -1509,6 +1725,13 @@ app.patch('/api/products/:id', (req, res) => {
         return res.status(400).json({ error: '请提供商品名称、skuIds 或 realtimeMonitoring' });
     }
     saveData();
+
+    logger.info('product.monitoring_updated', '商品监控配置已更新', {
+        product_id: product.id,
+        product_name: product.name,
+        monitored_sku_count: Array.isArray(product.monitored_skus) ? product.monitored_skus.length : 0,
+        realtime_monitoring: product.realtime_monitoring
+    });
 
     res.json({
         message: hasRealtimeUpdate || hasSkuUpdate ? '商品监控配置更新成功' : '商品名称更新成功',
@@ -1595,7 +1818,10 @@ app.get('/api/products/:id/trend', (req, res) => {
         });
 
     } catch (error) {
-        console.error('获取趋势数据失败:', error);
+        logger.error('product.trend_failed', '获取商品销量趋势失败', {
+            product_id: productId,
+            error
+        });
         res.status(500).json({ error: '获取趋势数据失败' });
     }
 });
@@ -1607,6 +1833,7 @@ app.delete('/api/products/:id', (req, res) => {
     // 删除商品前取消其待执行的实时监控任务。
     clearRealtimeProductRefreshTimer(productId);
     productRefreshPromises.delete(productId);
+    skuWarningLastLoggedAt.delete(String(productId));
 
     // 删除商品
     products = products.filter(p => p.id !== productId);
@@ -1616,6 +1843,8 @@ app.delete('/api/products/:id', (req, res) => {
 
     // 保存数据到文件
     saveData();
+
+    logger.info('product.deleted', '商品及其销量数据已删除', { product_id: productId });
 
     res.json({ message: '商品删除成功' });
 });
@@ -1667,6 +1896,12 @@ app.post('/api/settings', (req, res) => {
     // 设置变更后从当前时刻重新计算所有实时商品的下一次查询时间。
     scheduleAllRealtimeProductRefreshes();
 
+    logger.info('config.monitoring_updated', '监控配置已更新并生效', {
+        mail_recipient_count: recipients.length,
+        check_interval_minutes: checkIntervalMinutes,
+        realtime_check_interval_seconds: realTimeCheckIntervalSeconds
+    });
+
     res.json({
         message: '设置已保存',
         mailRecipients: getMailRecipients(),
@@ -1684,56 +1919,73 @@ app.post('/api/mail/test', async (req, res) => {
         if (!sent) return res.status(503).json({ error: '未配置完整邮件参数，请检查 MAIL_USERNAME、MAIL_PASSWORD 和 MAIL_RECIPIENTS' });
         return res.json({ message: '测试邮件已发送' });
     } catch (error) {
-        console.error('测试邮件发送失败:', error);
+        logger.error('mail.test_failed', '测试邮件发送失败', { error });
         return res.status(500).json({ error: `测试邮件发送失败: ${error.message}` });
     }
 });
 
 // 自动刷新所有商品数据的函数
-async function autoRefreshAllProducts() {
+async function autoRefreshAllProducts(trigger = 'schedule') {
     // 如果上一轮仍在运行，则跳过本轮，避免重复请求小红书。
     if (refreshInProgress) {
-        console.warn('上一轮自动刷新尚未完成，跳过本轮任务。');
+        logger.warn('monitor.batch_skipped', '上一轮自动刷新尚未完成，跳过本轮任务', { trigger });
         return;
     }
     refreshInProgress = true;
     try {
         if (products.length === 0) {
-            console.log('没有商品需要刷新');
+            logger.debug('monitor.batch_skipped', '没有商品需要自动刷新', { trigger, reason: 'no_products' });
             return;
         }
 
-        console.log(`================================`);
-        console.log(`开始自动刷新所有商品数据 (${new Date().toLocaleString()})`);
+        // 为本轮批量刷新生成关联编号。
+        const batchId = crypto.randomUUID();
+        // 记录批量刷新耗时起点。
+        const batchStartedAt = Date.now();
+        // 实时监控商品不参与全局分钟任务。
         const scheduledProducts = products.filter(product => product.realtime_monitoring !== true);
-        console.log(`需要刷新的商品数量: ${scheduledProducts.length}`);
-        console.log(`================================`);
+        if (scheduledProducts.length === 0) {
+            logger.debug('monitor.batch_skipped', '没有商品需要参与全局自动刷新', {
+                trigger,
+                reason: 'all_products_realtime',
+                realtime_product_count: products.length
+            });
+            return;
+        }
+        logger.info('monitor.batch_started', '开始自动刷新商品数据', {
+            batch_id: batchId,
+            trigger,
+            scheduled_product_count: scheduledProducts.length,
+            realtime_product_count: products.length - scheduledProducts.length
+        });
 
+        // 统计本轮成功数量。
         let successCount = 0;
+        // 统计本轮失败数量。
         let failCount = 0;
+        // 统计执行过程中切换为实时监控而跳过的数量。
+        let skippedCount = 0;
 
         for (const product of scheduledProducts) {
             try {
                 // 商品可能在本轮开始后切换为实时监控，执行前再次确认避免重复刷新。
                 if (product.realtime_monitoring === true) {
-                    console.log(`⏭️ 商品 ${product.name} 已切换为实时监控，跳过全局任务`);
+                    skippedCount++;
+                    logger.debug('monitor.product_refresh_skipped', '商品已切换为实时监控，跳过全局刷新', {
+                        batch_id: batchId,
+                        product_id: product.id,
+                        product_name: product.name
+                    });
                     continue;
                 }
-                console.log(`正在刷新商品: ${product.name} (ID: ${product.id})`);
-                const result = await refreshProductData(product, { source: 'global' });
-                if (result.salesRecorded) {
-                    console.log(`✅ 商品 ${product.name} 数据更新成功`);
-                    successCount++;
-                } else {
-                    console.log(`⏭️ 商品 ${product.name} 今天已更新过，跳过销量历史记录`);
-                    successCount++;
-                }
+                await refreshProductData(product, { source: 'global', batchId });
+                successCount++;
 
                 // 避免请求过于频繁，每个商品之间间隔2秒
                 await new Promise(resolve => setTimeout(resolve, 2000));
 
             } catch (error) {
-                console.error(`❌ 商品 ${product.name} 刷新失败:`, error.message);
+                // 失败详情已由 refreshProductData 记录，此处只累计批次结果。
                 failCount++;
             }
         }
@@ -1741,11 +1993,15 @@ async function autoRefreshAllProducts() {
         // 保存数据。
         saveData();
 
-        console.log(`================================`);
-        console.log(`自动刷新完成 (${new Date().toLocaleString()})`);
-        console.log(`成功: ${successCount} 个, 失败: ${failCount} 个`);
-        console.log(`下次自动刷新时间: ${new Date(Date.now() + checkIntervalMinutes * 60 * 1000).toLocaleString()}`);
-        console.log(`================================`);
+        logger.info('monitor.batch_completed', '自动刷新商品数据完成', {
+            batch_id: batchId,
+            trigger,
+            duration_ms: Date.now() - batchStartedAt,
+            success_count: successCount,
+            failure_count: failCount,
+            skipped_count: skippedCount,
+            next_run_at: new Date(Date.now() + checkIntervalMinutes * 60 * 1000).toISOString()
+        });
     } finally {
         // 无论刷新正常结束还是意外异常，都释放任务锁。
         refreshInProgress = false;
@@ -1756,10 +2012,7 @@ async function autoRefreshAllProducts() {
 function scheduleAutoRefresh() {
     // 配置发生变化时停止旧任务，避免多个定时器重复刷新。
     if (refreshTask) refreshTask.stop();
-    refreshTask = cron.schedule(`*/${checkIntervalMinutes} * * * *`, async () => {
-        console.log(`⏰ 定时任务触发：开始自动刷新商品数据（每 ${checkIntervalMinutes} 分钟）...`);
-        await autoRefreshAllProducts();
-    }, {
+    refreshTask = cron.schedule(`*/${checkIntervalMinutes} * * * *`, () => runWithLogContext({}, () => autoRefreshAllProducts('cron')), {
         timezone: "Asia/Shanghai"
     });
 }
@@ -1788,23 +2041,25 @@ function startServer(port) {
     const server = app.listen(port, '0.0.0.0', () => {
         // 保存实际监听端口，供日志和接口返回正确地址。
         activePort = port;
-        console.log(`================================`);
-        console.log(`小红书监控系统已启动`);
-        console.log(`访问地址: http://localhost:${port}`);
-        console.log(`================================`);
-        console.log(`当前商品数量: ${products.length}`);
-        console.log(`历史数据记录: ${salesData.length} 条`);
-        console.log('数据存储: JSON文件持久化');
-        console.log('数据目录:', DATA_DIR);
-        console.log(`================================`);
-        console.log('⏰ 自动刷新功能已启用');
-        console.log(`📅 刷新频率: 每 ${checkIntervalMinutes} 分钟一次`);
-        console.log(`================================`);
+        logger.info('service.started', '小红书监控服务已启动', {
+            port,
+            environment: process.env.NODE_ENV || 'development',
+            headless: HEADLESS,
+            product_count: products.length,
+            realtime_product_count: products.filter(product => product.realtime_monitoring === true).length,
+            sales_record_count: salesData.length,
+            data_directory: DATA_DIR,
+            check_interval_minutes: checkIntervalMinutes,
+            realtime_check_interval_seconds: realTimeCheckIntervalSeconds,
+            mail_configured: Boolean(process.env.MAIL_USERNAME && process.env.MAIL_PASSWORD && getMailRecipients().length > 0),
+            log_level: activeLogLevel,
+            log_format: activeLogFormat,
+            initial_refresh_delay_seconds: 10
+        });
 
         // 启动后 10 秒执行一次初始刷新，确保服务启动后尽快建立库存基线。
         setTimeout(async () => {
-            console.log('🚀 执行启动后的初始数据刷新...');
-            await autoRefreshAllProducts();
+            await autoRefreshAllProducts('startup');
         }, 10 * 1000);
     });
 
@@ -1812,28 +2067,57 @@ function startServer(port) {
     server.on('error', error => {
         // 默认端口被 Windows 保留时自动切换本机备用端口。
         if (error.code === 'EACCES' && !PORT_IS_EXPLICIT && port === PORT) {
-            console.warn(`端口 ${PORT} 无法监听（可能被 Windows 保留），尝试备用端口 ${FALLBACK_PORT}。`);
+            logger.warn('service.port_fallback', '默认端口无法监听，尝试备用端口', {
+                port: PORT,
+                fallback_port: FALLBACK_PORT,
+                error
+            });
             startServer(FALLBACK_PORT);
             return;
         }
 
         // 显式端口或其他错误必须直接提示，避免掩盖部署配置问题。
-        console.error(`服务器启动失败（端口 ${port}）：${error.message}`);
+        logger.fatal('service.start_failed', '服务器启动失败', { port, error });
         process.exit(1);
     });
 
     return server;
 }
 
-// 启动服务器
+// 防止重复执行容器退出清理流程。
+let shutdownInProgress = false;
+
+// 统一处理本地中断和容器停止信号，并记录完整生命周期。
+async function shutdown(signal) {
+    if (shutdownInProgress) return;
+    shutdownInProgress = true;
+    logger.info('service.shutdown_started', '服务开始退出', { signal });
+    try {
+        if (refreshTask) refreshTask.stop();
+        for (const [productId] of realtimeRefreshTimers) clearRealtimeProductRefreshTimer(productId);
+        await closeBrowser();
+        logger.info('service.shutdown_completed', '服务已安全退出', { signal });
+        process.exit(0);
+    } catch (error) {
+        logger.fatal('service.shutdown_failed', '服务退出清理失败', { signal, error });
+        process.exit(1);
+    }
+}
+
 // 进程退出时释放共享浏览器资源。
-process.once('SIGINT', async () => {
-    await closeBrowser();
-    process.exit(0);
-});
+process.once('SIGINT', () => shutdown('SIGINT'));
 // 捕获容器停止信号，确保登录目录锁被释放。
-process.once('SIGTERM', async () => {
-    await closeBrowser();
-    process.exit(0);
+process.once('SIGTERM', () => shutdown('SIGTERM'));
+// 记录未捕获同步异常后让容器按失败状态重启。
+process.once('uncaughtException', error => {
+    logger.fatal('process.uncaught_exception', '进程发生未捕获异常', { error });
+    process.exit(1);
 });
+// 记录未处理 Promise 拒绝后让容器按失败状态重启。
+process.once('unhandledRejection', reason => {
+    logger.fatal('process.unhandled_rejection', '进程发生未处理的 Promise 拒绝', { error: reason });
+    process.exit(1);
+});
+
+// 启动 HTTP 服务。
 startServer(PORT);

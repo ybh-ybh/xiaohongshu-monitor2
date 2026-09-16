@@ -6,6 +6,11 @@ services:
     environment:
       - NODE_ENV=production
       - TZ=Asia/Shanghai
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - LOG_FORMAT=${LOG_FORMAT:-json}
+      - LOG_REQUESTS=${LOG_REQUESTS:-true}
+      - LOG_HEALTH_CHECKS=${LOG_HEALTH_CHECKS:-false}
+      - SCRAPE_DEBUG_SCREENSHOT=${SCRAPE_DEBUG_SCREENSHOT:-false}
       - HEADLESS=${HEADLESS:-true}
       - CHECK_INTERVAL_MINUTES=${CHECK_INTERVAL_MINUTES:-5}
       - XHS_USER_DATA_DIR=${XHS_USER_DATA_DIR:-./data/browser-profile}
@@ -22,8 +27,12 @@ services:
       - MAIL_RECIPIENT=${MAIL_RECIPIENT}
     volumes:
       - ./data:/app/data
-      - ./logs:/app/logs
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"]
       interval: 30s

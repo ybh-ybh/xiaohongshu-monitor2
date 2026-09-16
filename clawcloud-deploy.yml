@@ -25,6 +25,16 @@ spec:
           value: "production"
         - name: TZ
           value: "Asia/Shanghai"
+        - name: LOG_LEVEL
+          value: "info"
+        - name: LOG_FORMAT
+          value: "json"
+        - name: LOG_REQUESTS
+          value: "true"
+        - name: LOG_HEALTH_CHECKS
+          value: "false"
+        - name: SCRAPE_DEBUG_SCREENSHOT
+          value: "false"
         # 以下登录变量请在 ClawCloud 控制台以 Secret/环境变量方式注入，不要把真实密码提交到仓库。
         - name: AUTH_USERNAME
           valueFrom:

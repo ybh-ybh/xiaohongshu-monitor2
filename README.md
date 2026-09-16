@@ -123,6 +123,32 @@ MAIL_RECIPIENTS=收件人1@example.com,收件人2@example.com
 
 登录凭据只保存在环境变量中。登录失败会按来源限流，业务页面和 `/api/*` 接口均要求有效会话；`/health` 保持公开，供 Docker/Kubernetes 健康检查使用。生产环境还应通过反向代理启用 HTTPS，并避免直接把容器端口暴露到公网。
 
+### 容器日志
+
+生产环境默认向 stdout/stderr 输出单行 JSON，不在容器内写日志文件。每条日志都有稳定的 `event` 字段；API、商品刷新和批量任务分别使用 `request_id`、`refresh_id`、`batch_id` 串联上下文。开启实时监控的商品每次轮询成功后都会输出一条 `monitor.realtime_poll_completed` 心跳日志，可直接确认高频轮询仍在运行。Docker Compose 已限制单个日志文件为 10 MiB，最多保留 3 个，避免长期运行占满磁盘。
+
+```bash
+# 持续查看 info 及以上日志
+docker compose logs -f --tail=200 xiaohongshu-monitor
+
+# 只看库存变化（Linux/macOS）
+docker compose logs --no-log-prefix xiaohongshu-monitor | grep 'monitor.stock_status_changed'
+
+# 持续观察实时监控心跳
+docker compose logs -f --no-log-prefix xiaohongshu-monitor | grep 'monitor.realtime_poll_completed'
+
+# 临时查看抓取细节
+LOG_LEVEL=debug docker compose up -d --force-recreate
+```
+
+- `LOG_LEVEL`：`debug`、`info`、`warn`、`error`、`fatal` 或 `silent`，默认 `info`。
+- `LOG_FORMAT`：生产使用 `json`；本地可用 `pretty`，两种格式都保持一条事件一行。
+- `LOG_REQUESTS`：是否记录 API 请求结果，默认开启；成功的 GET 请求仅在 `debug` 级别出现。
+- `LOG_HEALTH_CHECKS`：是否记录 `/health`，默认关闭。
+- `SCRAPE_DEBUG_SCREENSHOT`：是否覆盖保存 `debug_screenshot.png`，默认关闭，仅排查页面解析时临时开启。
+
+日志字段会自动隐藏密码、Cookie、Token 等认证信息，商品 URL 只记录不含查询参数的路径。
+
 启动服务后可用下面接口验证邮件配置：
 
 ```bash
